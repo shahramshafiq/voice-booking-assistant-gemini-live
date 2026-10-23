@@ -465,6 +465,14 @@ def test_stop_is_quick_even_while_gemini_is_sending_sound():
     run(scenario)
 
 
+def test_an_old_prewarmed_session_is_replaced_at_start():
+    async def scenario(call):
+        assert call.gemini.connections == 2  # the one from the page opening was too old, so Start opened a fresh one
+        await until(lambda: call.gemini.closed_connections == 1)  # and the old one was closed, not left open
+
+    run(scenario, live_prewarm_max_age_seconds=0)
+
+
 def test_every_call_gets_a_fresh_gemini_session_and_memory():
     async def scenario(call):
         await call.gemini.hear(" Book it.")

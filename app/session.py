@@ -275,7 +275,12 @@ class VoiceSession:
     async def _connect_all(self):
         """Open whatever is not open yet; anything already open is kept. Returns [gemini, calendar] results."""
         async with self._connect_lock:
-            live_ready = self.live is not None and self.live.is_open()
+            live = self.live
+            live_ready = (
+                live is not None
+                and live.is_open()
+                and time.monotonic() - live.opened_at < self.settings.live_prewarm_max_age_seconds  # its date is current
+            )
             window_is_old = (
                 self._warmed_at is None
                 or self._calendar_problem is not None

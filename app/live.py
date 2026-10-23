@@ -55,6 +55,7 @@ class GeminiLive:
         self.handle = None  # the latest session resumption handle
         self.audio_bytes_sent = 0
         self.connections = 0
+        self.opened_at = None  # when the session was first set up (time.monotonic)
         self._outbox = asyncio.Queue()  # everything we send goes through one sender, in order, so nothing waits
         self._sender_task = None
         self._closing = False
@@ -104,6 +105,7 @@ class GeminiLive:
         self.setup = self.build_setup(instructions, tools)
         started = time.perf_counter()
         await self._open()
+        self.opened_at = time.monotonic()
         log.info("Gemini Live ready (%s, voice %s) in %.0f ms", self.settings.gemini_live_model, self.settings.gemini_voice,
                  (time.perf_counter() - started) * 1000)
 

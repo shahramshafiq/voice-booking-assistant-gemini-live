@@ -1,6 +1,6 @@
 // Runs on the browser's audio thread. Turns microphone audio into small 16-bit PCM chunks.
 //
-// The microphone usually runs at 44100 or 48000 samples per second. Deepgram wants 16000.
+// The microphone usually runs at 44100 or 48000 samples per second. Gemini Live wants 16000.
 // We average the input samples that fall into each output sample (a simple low-pass filter)
 // and send a chunk every `chunkMs` milliseconds.
 class MicProcessor extends AudioWorkletProcessor {

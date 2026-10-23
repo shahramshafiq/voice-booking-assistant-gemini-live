@@ -2,7 +2,7 @@
 //
 // Incoming 16-bit PCM is stored in a ring buffer. Every 128 output samples the browser asks
 // process() for more sound; we read from the buffer and convert from the server's sample
-// rate (e.g. 16000) to the speaker's rate (e.g. 48000) by blending neighbouring samples.
+// rate (24000 from Gemini Live) to the speaker's rate (e.g. 48000) by blending neighbouring samples.
 //
 // Messages IN  (from app.js):  {type: "audio", pcm}   {type: "end"}   {type: "clear"}
 // Messages OUT (to app.js):    {type: "started"}  {type: "progress", playedMs}  {type: "drained"}

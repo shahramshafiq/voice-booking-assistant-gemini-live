@@ -8,7 +8,7 @@ A voice receptionist that books, looks up, moves and cancels appointments in Goo
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![Gemini Live](https://img.shields.io/badge/Gemini%20Live-gemini--3.8--live-8E75B2?style=flat-square&logo=googlegemini&logoColor=white)
 ![Google Calendar](https://img.shields.io/badge/Google%20Calendar-API%20v3-4285F4?style=flat-square&logo=googlecalendar&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-121%20passing-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-125%20passing-brightgreen?style=flat-square)
 
 </div>
 
@@ -39,8 +39,9 @@ browser speakers (24 kHz PCM), transcripts, tool list, latency table
 ## Key Features
 
 - **Eight booking tools:** services, business config, calendar availability, slot search, create, look up, reschedule and cancel. All rules (opening hours, breaks, buffers, notice, durations, cancellation policy) live in backend code and `.env`, never in the model.
-- **Confirm before any change:** the first call to a change tool only parks the action and returns a read-back question written by the code. Gemini reads it out. The change happens only when the caller says yes in their answer right after hearing that question. A yes from any other turn, a question that was cut short, or a read-back that Gemini did not say (or said with a different time, date or day) means the question is asked again.
+- **Confirm before any change:** the first call to a change tool only parks the action and returns a read-back question written by the code. Gemini reads it out. The change happens only when the caller says yes in their first answer after hearing that question. A yes spoken over the name, the phone number or "Shall I book it?" counts once the service, day and time were heard. A yes from any other turn, a question cut short before its day and time, or a read-back that Gemini did not say (or said with a different time, date or day) means the question is asked again.
 - **One connection for speech, thinking and voice:** no speech to text, model and voice hand-offs. Gemini is connected and set up before Start, the next weeks of the calendar are kept in memory, and every tool answers Gemini as soon as it is finished.
+- **Filler sentences:** the prompt tells Gemini to say a short filler before every tool call ("Let me check the calendar for you.", "Great, I'm booking that for you now."), set per kind of tool in `.env.example`, so the line is never silent while a tool works.
 - **Barge-in:** Gemini stops when you talk over it. Gemini makes sound faster than it is played, so when you talk over the end of an answer that is still playing, the server stops the speakers itself.
 - **Safe against retries and races:** a repeated request returns the existing booking, a lost reply is checked before reporting failure, a reschedule updates the same calendar event, and two callers cannot take one slot.
 - **Identity checks:** lookup, reschedule and cancel need the booking reference and the phone number, and wrong tries are limited per call and per phone number.
@@ -79,7 +80,7 @@ voice-booking-assistant-gemini-live/
   prompts/               System prompt template
   scripts/               check_calendar.py and check_gemini.py
   static/                Web page, audio worklets, styles
-  tests/                 121 tests with a fake Gemini server and a fake calendar
+  tests/                 125 tests with a fake Gemini server and a fake calendar
 ```
 
 ## Getting Started
@@ -182,7 +183,7 @@ The page shows both transcripts, the tools that were used and a latency table fo
 python -m pytest
 ```
 
-The 121 tests need no keys and cost nothing. A local fake Gemini Live server speaks the same JSON protocol as the real one (binary frames, setup, transcripts, tool calls, interruptions, goAway and session resumption), and a fake Google Calendar answers the calendar requests. The tests cover date parsing, slot maths, the booking rules, the confirmation gate, the guardrails, the Gemini client and whole conversations.
+The 125 tests need no keys and cost nothing. A local fake Gemini Live server speaks the same JSON protocol as the real one (binary frames, setup, transcripts, tool calls, interruptions, goAway and session resumption), and a fake Google Calendar answers the calendar requests. The tests cover date parsing, slot maths, the booking rules, the confirmation gate, the guardrails, the Gemini client and whole conversations.
 
 ## Limitations and Roadmap
 

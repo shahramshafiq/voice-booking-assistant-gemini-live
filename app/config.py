@@ -214,7 +214,7 @@ class Settings:
     confirm_words: List[str]
     refuse_words: List[str]
     confirm_ttl_seconds: float
-    confirm_heard_share: float
+    read_back_present_share: float
     read_back_min_share: float
 
     # what is said when a change has been made
@@ -318,7 +318,7 @@ def load_settings():
         confirm_words=[word.lower() for word in r.text_list("CONFIRM_WORDS")],
         refuse_words=[word.lower() for word in r.text_list("REFUSE_WORDS")],
         confirm_ttl_seconds=r.number("CONFIRM_TTL_SECONDS"),
-        confirm_heard_share=r.number("CONFIRM_HEARD_SHARE"),
+        read_back_present_share=r.number("READ_BACK_PRESENT_SHARE"),
         read_back_min_share=r.number("READ_BACK_MIN_SHARE"),
         reply_booked=r.reply_template("REPLY_BOOKED"),
         reply_already_booked=r.reply_template("REPLY_ALREADY_BOOKED"),
@@ -342,8 +342,9 @@ def load_settings():
     if not r.problems:
         if not 20 <= settings.mic_chunk_ms <= 100:
             r.problems.append("MIC_CHUNK_MS should be between 20 and 100 (Google recommends 20 to 40 for Gemini Live)")
-        if not (0 < settings.confirm_heard_share <= 1 and 0 < settings.read_back_min_share <= 1):
-            r.problems.append("CONFIRM_HEARD_SHARE and READ_BACK_MIN_SHARE must be between 0 and 1")
+        if not 0 < settings.read_back_present_share <= settings.read_back_min_share <= 1:
+            r.problems.append("READ_BACK_PRESENT_SHARE and READ_BACK_MIN_SHARE must be between 0 and 1, "
+                              "and READ_BACK_PRESENT_SHARE must not be higher")
         if not 100 <= settings.live_silence_duration_ms <= 5000:
             r.problems.append("LIVE_SILENCE_DURATION_MS should be between 100 and 5000 (Google recommends 500 to 800)")
         if settings.gemini_input_sample_rate != 16000 or settings.gemini_output_sample_rate != 24000:

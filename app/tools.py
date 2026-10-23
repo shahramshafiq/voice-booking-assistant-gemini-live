@@ -155,6 +155,9 @@ class ToolRunner:
         while True:
             if self.memory.pending is not pending:
                 return False  # another call replaced or finished the question meanwhile
+            if self.memory.turn_no > pending.answer_turn:
+                log.info("the caller has said something else since answering the question")
+                return False
             words = self.memory.answer_to(pending)
             if self.is_affirmative(words):
                 return True
@@ -242,20 +245,21 @@ class ToolRunner:
         # Step 1: check everything against the calendar. Nothing is changed here. The confirmation QUESTION is checked
         # against the in-memory calendar window; the check right before the real change always asks Google.
         pending = self.memory.pending
-        answering = pending is not None and pending.tool == spec.name and pending.answer_turn == ctx.turn_no
+        answering = pending is not None and pending.tool == spec.name and pending.heard_at is not None
         plan = await self.service.prepare(spec.name, args, self.memory.verified_booking, fresh=answering)
         if plan.result is not None:  # an error, or a retry of something already done: nothing to confirm
             return plan.result, False
 
         # Step 2: the real change needs a yes to exactly this action, said in the caller's answer to the question
-        # (the turn right after they heard it). A yes from any other turn never counts.
+        # (their first words after hearing it). A yes from any other turn never counts.
         pending = self.memory.pending
-        confirmed = self.memory.pending_is_confirmable(plan.key, ctx.turn_no) and await self.caller_said_yes(pending)
+        confirmed = self.memory.pending_is_confirmable(plan.key) and await self.caller_said_yes(pending)
         if not confirmed:
             self.memory.set_pending(plan.key, spec.name, plan.question)
             log.info("%s is waiting for the caller's yes", spec.name)
             return {"ok": False, "error": "CONFIRMATION_REQUIRED", "say": plan.question,
-                    "message": "Nothing has been done yet. Read the say sentence to the caller word for word and wait for the answer."}, False
+                    "message": "Nothing has been done yet. Read the say sentence to the caller word for word, from its "
+                               "first word to its last, and wait for the answer."}, False
         self.memory.pending = None
 
         # From here on the change must finish even if the caller interrupts. The memory is therefore

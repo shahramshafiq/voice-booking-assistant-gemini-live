@@ -64,15 +64,15 @@ class SessionMemory:
             self.pending.heard_at = time.perf_counter()
             self.pending.heard_turn = self.turn_no
 
-    def pending_is_confirmable(self, key, turn_no):
-        """True when `key` is the action the caller was asked about, they heard the question, this is the turn
-        right after it, and it is not too old."""
+    def pending_is_confirmable(self, key):
+        """True when `key` is the action the caller was asked about, they heard the question, they have not said
+        anything else since their answer to it, and it is not too old."""
         p = self.pending
         return (
             p is not None
             and p.key == key
             and p.heard_at is not None
-            and turn_no == p.answer_turn
+            and self.turn_no <= p.answer_turn
             and time.monotonic() - p.created < self.settings.confirm_ttl_seconds
         )
 

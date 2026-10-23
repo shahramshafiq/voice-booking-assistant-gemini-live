@@ -248,6 +248,8 @@ class Settings:
     confirm_words: List[str]
     refuse_words: List[str]
     confirm_ttl_seconds: float
+    confirm_heard_share: float
+    read_back_min_share: float
     quick_answer_max_words: int
     quick_extra_words: List[str]
     reply_declined: str
@@ -429,6 +431,8 @@ def load_settings():
         confirm_words=[word.lower() for word in r.text_list("CONFIRM_WORDS")],
         refuse_words=[word.lower() for word in r.text_list("REFUSE_WORDS")],
         confirm_ttl_seconds=r.number("CONFIRM_TTL_SECONDS"),
+        confirm_heard_share=r.number("CONFIRM_HEARD_SHARE"),
+        read_back_min_share=r.number("READ_BACK_MIN_SHARE"),
         quick_answer_max_words=r.integer("QUICK_ANSWER_MAX_WORDS"),
         quick_extra_words=[word.lower() for word in r.text_list("QUICK_ANSWER_EXTRA_WORDS")],
         reply_declined=r.text("REPLY_DECLINED"),
@@ -509,6 +513,8 @@ def load_settings():
                 r.problems.append("DEEPGRAM_EAGER_EOT_THRESHOLD must not be higher than DEEPGRAM_CONFIRM_EOT_THRESHOLD")
             if not 500 <= settings.deepgram_confirm_eot_timeout_ms <= 60000:
                 r.problems.append("DEEPGRAM_CONFIRM_EOT_TIMEOUT_MS must be between 500 and 60000")
+        if not (0 < settings.confirm_heard_share <= 1 and 0 < settings.read_back_min_share <= 1):
+            r.problems.append("CONFIRM_HEARD_SHARE and READ_BACK_MIN_SHARE must be between 0 and 1")
         if not 100 <= settings.live_silence_duration_ms <= 5000:
             r.problems.append("LIVE_SILENCE_DURATION_MS should be between 100 and 5000 (Google recommends 500 to 800)")
         if settings.gemini_input_sample_rate != 16000 or settings.gemini_output_sample_rate != 24000:

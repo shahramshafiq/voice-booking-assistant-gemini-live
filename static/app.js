@@ -33,6 +33,7 @@ let micMute = null;
 let playerNode = null;
 let streaming = false; // true once the server says it is ready for microphone audio
 let running = false;
+let userBubble = null;
 let assistantBubble = null;
 const perceivedHistory = [];
 
@@ -75,16 +76,11 @@ function addMessage(role, text) {
 
 function renderMetrics(m) {
     const rows = [
-        ["Waited after your last word before the system was sure you were done", m.eot_lag_ms],
-        ["Early answer was used (speculative start)", m.draft_hit ? "yes" : "no"],
-        ["OpenAI request sent", m.llm_request_ms],
-        ["OpenAI first word", m.llm_first_token_ms],
+        ["Gemini started answering (first sound, words or tool call)", m.answer_started_ms],
         ["Booking tools started", m.tools_started_ms],
         ["Booking tools finished", m.tools_done_ms],
-        ["Short filler phrase spoken while waiting", m.filler_sent_ms],
-        ["First phrase sent to the voice", m.first_chunk_sent_ms],
-        ["First audio from the voice", m.tts_first_audio_ms],
-        ["First audio reached the browser", m.audio_to_browser_ms],
+        ["First sound from Gemini", m.first_audio_ms],
+        ["Gemini finished making the whole answer", m.generation_complete_ms],
         ["Sound started playing", m.audio_played_ms],
     ];
     metricsEl.innerHTML = "";
@@ -92,6 +88,11 @@ function renderMetrics(m) {
         const row = metricsEl.insertRow();
         row.insertCell().textContent = label;
         row.insertCell().textContent = typeof value === "number" ? value + " ms" : (value ?? "n/a");
+    }
+    if (!m.after_speech) {
+        const row = metricsEl.insertRow();
+        row.insertCell().textContent = "This answer did not follow your speech, so it has no total.";
+        row.insertCell().textContent = "";
     }
     if (typeof m.perceived_ms === "number") {
         const row = metricsEl.insertRow();
@@ -213,7 +214,7 @@ async function buildAudioGraph(config) {
         numberOfInputs: 0,
         numberOfOutputs: 1,
         outputChannelCount: [1],
-        processorOptions: { inputRate: config.tts_sample_rate },
+        processorOptions: { inputRate: config.output_sample_rate },
     });
     playerNode.connect(audioContext.destination);
     playerNode.port.onmessage = (event) => {
@@ -266,16 +267,18 @@ function onServerMessage(event) {
             // the server went back to idle by itself (a failed start, a lost connection): reset the buttons too
             if (message.value === "idle" && running) stopConversation(false);
             break;
-        case "user_speaking":
-            interimEl.textContent = "...";
-            break;
-        case "transcript_interim":
-            interimEl.textContent = message.text;
-            break;
-        case "transcript_final":
-            interimEl.textContent = "";
-            addMessage("user", message.text);
+        case "turn":
+            // a new turn: the caller's words and the answer get their bubbles now, so they stay in order
+            // even when the answer starts before Gemini's text of the caller's words arrives
+            userBubble = addMessage("user", "");
             assistantBubble = addMessage("assistant", "");
+            break;
+        case "user_text":
+            if (userBubble) userBubble.textContent = message.text;
+            break;
+        case "reply":
+            // a second answer in the same turn (for example one that replaces a stopped answer) gets its own bubble
+            if (!assistantBubble || assistantBubble.textContent) assistantBubble = addMessage("assistant", "");
             break;
         case "tool":
             addToolRow(message);
@@ -288,10 +291,7 @@ function onServerMessage(event) {
             warningEl.hidden = true;
             break;
         case "assistant_text":
-            if (assistantBubble) {
-                if (message.replace) assistantBubble.textContent = message.text;
-                else assistantBubble.textContent += message.text;
-            }
+            if (assistantBubble) assistantBubble.textContent = message.text;
             break;
         case "audio_end":
             if (playerNode) playerNode.port.postMessage({ type: "end" });

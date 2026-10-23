@@ -75,6 +75,27 @@ class _Reader:
             self.problems.append(f"{name} must be a number or left empty, got {value!r}")
             return None
 
+    def optional_integer(self, name):
+        """Blank or missing means 'let the service decide' (returns None)."""
+        value = os.getenv(name)
+        if value is None or not value.strip():
+            return None
+        try:
+            return int(value.strip())
+        except ValueError:
+            self.problems.append(f"{name} must be a whole number or left empty, got {value!r}")
+            return None
+
+    def optional_choice(self, name, choices):
+        """Blank or missing means 'let the service decide' (returns None)."""
+        value = (os.getenv(name) or "").strip()
+        if not value:
+            return None
+        if value not in choices:
+            self.problems.append(f"{name} must be one of {', '.join(choices)} or left empty, got {value!r}")
+            return None
+        return value
+
     def optional_list(self, name, separator="|"):
         """Blank or missing means 'off' (an empty list)."""
         return [part.strip() for part in (os.getenv(name) or "").split(separator) if part.strip()]
@@ -194,6 +215,20 @@ class Settings:
     max_verify_failures: int
     verify_lock_seconds: float
     write_race_window_seconds: float
+
+    # Gemini Live (hears, thinks and speaks)
+    gemini_api_key: str  # a secret: never log it, never show it to the model
+    gemini_live_ws_url: str
+    gemini_live_model: str
+    gemini_voice: str
+    gemini_input_sample_rate: int
+    gemini_output_sample_rate: int
+    live_connect_timeout_seconds: float
+    live_silence_duration_ms: int
+    live_prefix_padding_ms: Optional[int]
+    live_start_sensitivity: Optional[str]
+    live_end_sensitivity: Optional[str]
+    live_transcript_wait_ms: float
 
     # OpenAI (LLM)
     openai_api_key: str
@@ -367,6 +402,18 @@ def load_settings():
         max_verify_failures=r.integer("MAX_VERIFY_FAILURES"),
         verify_lock_seconds=r.number("VERIFY_LOCK_SECONDS"),
         write_race_window_seconds=r.number("WRITE_RACE_WINDOW_SECONDS"),
+        gemini_api_key=r.text("GEMINI_API_KEY"),
+        gemini_live_ws_url=r.text("GEMINI_LIVE_WS_URL"),
+        gemini_live_model=r.text("GEMINI_LIVE_MODEL"),
+        gemini_voice=r.text("GEMINI_VOICE"),
+        gemini_input_sample_rate=r.integer("GEMINI_INPUT_SAMPLE_RATE"),
+        gemini_output_sample_rate=r.integer("GEMINI_OUTPUT_SAMPLE_RATE"),
+        live_connect_timeout_seconds=r.number("LIVE_CONNECT_TIMEOUT_SECONDS"),
+        live_silence_duration_ms=r.integer("LIVE_SILENCE_DURATION_MS"),
+        live_prefix_padding_ms=r.optional_integer("LIVE_PREFIX_PADDING_MS"),
+        live_start_sensitivity=r.optional_choice("LIVE_START_SENSITIVITY", ("START_SENSITIVITY_HIGH", "START_SENSITIVITY_LOW")),
+        live_end_sensitivity=r.optional_choice("LIVE_END_SENSITIVITY", ("END_SENSITIVITY_HIGH", "END_SENSITIVITY_LOW")),
+        live_transcript_wait_ms=r.number("LIVE_TRANSCRIPT_WAIT_MS"),
         openai_api_key=r.text("OPENAI_API_KEY"),
         openai_base_url=r.text("OPENAI_BASE_URL"),
         openai_model=r.text("OPENAI_MODEL"),
@@ -462,6 +509,10 @@ def load_settings():
                 r.problems.append("DEEPGRAM_EAGER_EOT_THRESHOLD must not be higher than DEEPGRAM_CONFIRM_EOT_THRESHOLD")
             if not 500 <= settings.deepgram_confirm_eot_timeout_ms <= 60000:
                 r.problems.append("DEEPGRAM_CONFIRM_EOT_TIMEOUT_MS must be between 500 and 60000")
+        if not 100 <= settings.live_silence_duration_ms <= 5000:
+            r.problems.append("LIVE_SILENCE_DURATION_MS should be between 100 and 5000 (Google recommends 500 to 800)")
+        if settings.gemini_input_sample_rate != 16000 or settings.gemini_output_sample_rate != 24000:
+            r.problems.append("GEMINI_INPUT_SAMPLE_RATE must be 16000 and GEMINI_OUTPUT_SAMPLE_RATE 24000 (what Gemini Live uses)")
         if settings.deepgram_encoding != "linear16":
             r.problems.append("DEEPGRAM_ENCODING must be linear16 (the browser sends 16-bit PCM)")
         if not 4 <= settings.booking_ref_digits <= 9:

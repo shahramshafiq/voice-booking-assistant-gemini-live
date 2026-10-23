@@ -124,14 +124,19 @@ class GeminiLive:
         try:
             await websocket.send(json.dumps(setup))
             first = parse(await asyncio.wait_for(websocket.recv(), s.live_connect_timeout_seconds))
-        except websockets.ConnectionClosed as exc:
-            raise LiveError(f"Gemini closed the connection during setup ({close_reason(exc)})") from exc
-        except asyncio.TimeoutError as exc:
-            await websocket.close()
-            raise LiveError("Gemini did not answer the setup in time") from exc
-        if "setupComplete" not in first:
-            await websocket.close()
-            raise LiveError(f"Gemini answered the setup with {sorted(first)} instead of setupComplete")
+            if "setupComplete" not in first:
+                raise LiveError(f"Gemini answered the setup with {sorted(first)} instead of setupComplete")
+            if self._closing:
+                raise LiveError("the connection was closed while it was opening")
+        except BaseException as exc:
+            # never leave a half-open connection behind (it would keep a Gemini session open)
+            with suppress(Exception):
+                await websocket.close()
+            if isinstance(exc, websockets.ConnectionClosed):
+                raise LiveError(f"Gemini closed the connection during setup ({close_reason(exc)})") from exc
+            if isinstance(exc, asyncio.TimeoutError):
+                raise LiveError("Gemini did not answer the setup in time") from exc
+            raise
 
         replaced, self.websocket = self.websocket, websocket
         self.connections += 1
@@ -221,6 +226,7 @@ class GeminiLive:
             log.warning("Gemini is closing the connection and gave no session handle; the call will end")
             return
         self._reconnecting = True
+        problem = None
         try:
             old = await self._open()
             log.info("continued the conversation on a new Gemini connection (number %d)", self.connections)
@@ -228,9 +234,13 @@ class GeminiLive:
                 with suppress(Exception):
                     await old.close()
         except Exception as exc:
+            problem = exc
             log.error("could not continue on a new Gemini connection: %s", exc)
         finally:
             self._reconnecting = False
+        if problem is not None and not self.is_open() and not self._closing:
+            # the old connection ended while we were trying, so its reader did not report it: report it here
+            await self.on_closed(f"Gemini closed the connection and a new one could not be opened ({problem})")
 
     def _spawn(self, coroutine):
         task = asyncio.create_task(coroutine)
@@ -240,6 +250,8 @@ class GeminiLive:
     # ================================================================ closing
     async def close(self):
         self._closing = True
+        for task in list(self._background):  # for example a reconnect that is still opening its connection
+            task.cancel()
         if self._sender_task is not None:
             self._sender_task.cancel()
             with suppress(asyncio.CancelledError, Exception):

@@ -138,6 +138,41 @@ def test_go_away_moves_the_call_to_a_new_connection_with_the_saved_handle():
     asyncio.run(scenario())
 
 
+def test_closing_while_the_connection_is_still_opening_leaves_nothing_open():
+    async def scenario():
+        fake = await FakeGeminiLive().start()
+        fake.setup_delay = 0.3
+        live = GeminiLive(replace(base_settings, gemini_live_ws_url=fake.url), Recorder().on_message, Recorder().on_closed)
+        opening = asyncio.create_task(live.connect("x", []))
+        await until(lambda: fake.setups)
+        await live.close()  # for example the page was closed while it was still getting ready
+        try:
+            await opening
+        except LiveError:
+            pass
+        await until(lambda: fake.closed_connections == 1)  # the half-open connection was closed, not leaked
+        assert not live.is_open()
+        await fake.stop()
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_move_to_a_new_connection_ends_the_call_with_a_reason():
+    async def scenario():
+        fake, live, recorder = await connected()
+        fake.setup_delay = 0.3  # the new connection is slow...
+        fake.reject = (1011, "The service is busy.")  # ...and then refused
+        await fake.go_away("handle-1")
+        await until(lambda: len(fake.setups) == 2)
+        await fake.connection.close(1000, "time is up")  # the old connection ends while the new one is being opened
+        await until(lambda: recorder.closed)
+        assert "1011: The service is busy." in recorder.closed[0]  # so the session can end the call instead of hanging
+        await live.close()
+        await fake.stop()
+
+    asyncio.run(scenario())
+
+
 def test_a_connection_that_ends_by_itself_is_reported_with_the_reason():
     async def scenario():
         fake, live, recorder = await connected()

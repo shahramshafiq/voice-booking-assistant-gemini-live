@@ -21,6 +21,8 @@ def build_instructions(settings, now):
         "SERVICES": services,
         "NOW": f"{now.strftime('%A')} {now.day} {now.strftime('%B %Y')}, {say_time(now)}",
     }
+    for kind, sentences in settings.tool_fillers.items():
+        values[f"FILLER_{kind.upper()}"] = " or ".join(f'"{sentence}"' for sentence in sentences)
     text = settings.system_prompt_template
     for name, value in values.items():
         text = text.replace("{{" + name + "}}", value)

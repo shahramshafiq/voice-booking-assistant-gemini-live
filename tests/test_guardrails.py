@@ -59,7 +59,8 @@ def check(phrase, tail="", write_ok=frozenset(), refs=frozenset()):
 
 
 def test_normal_speech_passes():
-    for phrase in ("I have 3 PM or 4 PM tomorrow.", "Which one would you like?", "Sorry, that time is already taken."):
+    for phrase in ("I have 3 PM or 4 PM tomorrow.", "Which one would you like?", "Sorry, that time is already taken.",
+                   "Great, I'm booking that for you now.", "Okay, I'm cancelling that for you now."):  # the fillers
         verdict = check(phrase)
         assert verdict.ok and verdict.text == phrase
 

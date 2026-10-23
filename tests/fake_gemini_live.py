@@ -26,7 +26,9 @@ class FakeGeminiLive:
         self.notes = []  # text notes (clientContent) received
         self.connection = None  # the newest connection
         self.connections = 0
+        self.closed_connections = 0
         self.reject = None  # (code, reason): close every new connection after its setup, like a wrong key
+        self.setup_delay = 0.0  # seconds before the setup is answered (a slow connection)
         self._server = None
 
     async def start(self):
@@ -48,6 +50,7 @@ class FakeGeminiLive:
             return
         self.setups.append(setup)
         self.handles.append(setup.get("setup", {}).get("sessionResumption", {}).get("handle"))
+        await asyncio.sleep(self.setup_delay)
         if self.reject:
             await connection.close(*self.reject)
             return
@@ -56,8 +59,8 @@ class FakeGeminiLive:
             return
         self.connections += 1
         self.connection = connection
-        await connection.send(json.dumps({"setupComplete": {}}).encode())
         try:
+            await connection.send(json.dumps({"setupComplete": {}}).encode())
             async for raw in connection:
                 message = json.loads(raw)
                 if "realtimeInput" in message:
@@ -71,6 +74,8 @@ class FakeGeminiLive:
                     self.notes.append(message["clientContent"]["turns"][0]["parts"][0]["text"])
         except websockets.ConnectionClosed:
             pass
+        finally:
+            self.closed_connections += 1
 
     # ================================================================ the test plays Gemini
     async def send(self, message):

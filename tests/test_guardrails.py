@@ -67,7 +67,8 @@ def test_normal_speech_passes():
 def test_secrets_are_never_spoken():
     assert not check("the token is ya29.a0AfH6SMBx1234567890abcdef").ok
     assert not check("use key sk-proj-abcdefghijklmnop1234").ok
-    assert not check(f"it is {settings.openai_api_key}").ok
+    assert not check("the key is AIzaSyD-abcdefghijklmnopqrstuvwxyz12345").ok  # the shape of a Gemini key
+    assert not check(f"it is {settings.gemini_api_key}").ok
     blocked = check("Bearer abcdefghijklmnop123")
     assert blocked.text == settings.output_block_reply
 
@@ -118,8 +119,3 @@ def test_made_up_references_are_stopped():
     assert check("Please call me back on 0 3 0 0 1 2 3 4 5 6 7.").ok  # phone numbers are not references
     split = check("1 7 6.", tail="Your booking reference is 4 8 2,", refs={"111111"})  # digits arrive in two phrases
     assert not split.ok
-
-
-def test_speech_cleaning():
-    assert check("**Great**, see https://example.com for more").text == "Great, see the link for more"
-    assert check("Your reference is 482176.", refs={"482176"}).text == "Your reference is 4 8 2, 1 7 6."

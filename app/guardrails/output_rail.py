@@ -1,23 +1,21 @@
-"""The output guardrail: checks every phrase the assistant is about to SPEAK, before it goes to the voice.
+"""The output guardrail: checks what the assistant is saying, from Gemini's own transcript of its answer.
 
-It works on the small phrases the text is already cut into for the voice, with plain code, so it adds
-no noticeable delay. It stops:
+Gemini makes its sound faster than the browser plays it, so this text normally arrives before the caller hears
+the same words, and a stopped answer is usually silenced before the bad part is played. It is plain code, so it
+adds no noticeable delay. It finds:
   - secrets (API keys, the calendar token) being read out;
   - the assistant's own instructions being read out;
-  - a claim like "I have booked it" when no booking change really succeeded in this turn;
+  - a claim like "I have booked it" when no booking change really succeeded in this conversation;
   - a booking reference, said after the word "reference", that no tool ever returned (a made-up number).
-Phrases that pass are also cleaned for speech: no markdown, links or emoji, and long numbers are
-read digit by digit.
 """
 import logging
 import re
 from dataclasses import dataclass
 
-from ..booking.speech import spell_digits
-
 log = logging.getLogger("guardrail.output")
 
 SECRET_PATTERNS = [
+    re.compile(r"\bAIza[0-9A-Za-z_-]{30,}"),  # a Google API key, like the Gemini key
     re.compile(r"ya29\.[A-Za-z0-9._-]{10,}"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
     re.compile(r"\bBearer\s+[A-Za-z0-9._-]{12,}", re.IGNORECASE),
@@ -51,13 +49,12 @@ CLAIMS = [
 LEAK_WORDS = 10
 
 REFERENCE_MENTION = re.compile(r"\b(?:reference|ref)\b[^0-9]{0,25}(\d(?:[ ,.-]{0,2}\d)*)", re.IGNORECASE)
-EMOJI = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF]")
 
 
 @dataclass
 class OutputVerdict:
     ok: bool
-    text: str  # the cleaned phrase when ok, otherwise the replacement to say
+    text: str  # the text itself when ok, otherwise the replacement to say
     reason: str = ""
 
 
@@ -68,9 +65,7 @@ def _words(text):
 class OutputRail:
     def __init__(self, settings, instructions):
         self.settings = settings
-        self.secrets = [value for value in (
-            settings.openai_api_key, settings.deepgram_api_key, settings.elevenlabs_api_key, settings.google_calendar_api_token,
-        ) if len(value) >= 8]
+        self.secrets = [value for value in (settings.gemini_api_key, settings.google_calendar_api_token) if len(value) >= 8]
         # only the RULES part of the prompt is protected; the business information is meant to be spoken
         rules = _words(instructions.split("BUSINESS INFORMATION")[0])
         self.rule_phrases = {tuple(rules[i:i + LEAK_WORDS]) for i in range(len(rules) - LEAK_WORDS + 1)}
@@ -95,7 +90,7 @@ class OutputRail:
             if number not in known_refs:
                 return self._block("unknown_reference", self.settings.output_unconfirmed_reply)
 
-        return OutputVerdict(True, self._clean_for_speech(phrase))
+        return OutputVerdict(True, phrase)
 
     # ---------------------------------------------------------------- helpers
     def _block(self, reason, replacement):
@@ -106,12 +101,3 @@ class OutputRail:
         """Numbers said right after the word 'reference' (also one digit at a time, '4 8 2 1 7 6') that have a reference's length."""
         runs = (re.sub(r"\D", "", m.group(1)) for m in REFERENCE_MENTION.finditer(text))
         return [run for run in runs if len(run) == self.settings.booking_ref_digits]
-
-    @staticmethod
-    def _clean_for_speech(text):
-        text = re.sub(r"https?://\S+", "the link", text)
-        text = re.sub(r"[*_#`>]+", "", text)
-        text = EMOJI.sub("", text)
-        text = re.sub(r"\b\d{6,}\b", lambda m: spell_digits(m.group(0)), text)
-        text = re.sub(r"\s*\n+\s*", ". ", text)
-        return re.sub(r"\s{2,}", " ", text).strip()

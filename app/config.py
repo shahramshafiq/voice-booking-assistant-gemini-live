@@ -206,6 +206,7 @@ class Settings:
     live_transcript_wait_ms: float
     live_prewarm_max_age_seconds: float
     system_prompt_template: str
+    tool_fillers: dict  # kind of tool call -> the filler sentences said right before it
     max_tool_rounds: int
     tool_timeout_seconds: float
 
@@ -310,6 +311,8 @@ def load_settings():
         live_transcript_wait_ms=r.number("LIVE_TRANSCRIPT_WAIT_MS"),
         live_prewarm_max_age_seconds=r.number("LIVE_PREWARM_MAX_AGE_SECONDS"),
         system_prompt_template=r.file_text("SYSTEM_PROMPT_FILE"),
+        tool_fillers={kind: r.text_list(f"TOOL_FILLER_{kind.upper()}", separator="|")
+                      for kind in ("search", "lookup", "prepare", "book", "reschedule", "cancel")},
         max_tool_rounds=r.integer("MAX_TOOL_ROUNDS"),
         tool_timeout_seconds=r.number("TOOL_TIMEOUT_SECONDS"),
         confirm_words=[word.lower() for word in r.text_list("CONFIRM_WORDS")],

@@ -71,6 +71,30 @@ def _read_back_differs(question, said):
     return bool(told - asked) or bool(asked_weekdays and told_weekdays - asked_weekdays)
 
 
+DETAILS_END = re.compile(r", for |\. (?:Shall I|Is that right)")
+
+
+def _details_part(question):
+    """The part of the read-back a caller must hear before their yes counts: the service, the day and the time.
+    The name, the phone number and the closing question ("Shall I book it?") may be talked over."""
+    match = DETAILS_END.search(question)
+    return question[:match.start()] if match else question
+
+
+def _speaking_units(text):
+    """A rough spoken length of a text in word-sized units: a word is 1, a number of one or two digits 1.2, every digit
+    of a longer number 1.2 (it is read one digit at a time), and a comma or a full stop is a short pause (0.6)."""
+    units = 0.0
+    for token in re.findall(r"[A-Za-z']+|\d+|[,.:;?!]", text):
+        if token[0].isdigit():
+            units += 1.2 * (len(token) if len(token) > 2 else 1)
+        elif token in ",.:;?!":
+            units += 0.6
+        else:
+            units += 1
+    return units
+
+
 class Reply:
     """One answer from Gemini: from its first sound, text or tool call until turnComplete or an interruption."""
 
@@ -82,11 +106,9 @@ class Reply:
         self.offset_ms = 0.0  # sound still waiting in the browser's player when this answer began
         self.text = ""  # what Gemini said, from its own transcript
         self.finished = False  # turnComplete: all of its audio has arrived
-        self.asks_to_confirm = False  # the confirmation question is read out in this answer
         self.blocked = False  # the output guardrail stopped it: the rest of its audio is dropped
         self.replacement = None  # what Gemini is asked to say instead, once this answer has ended
         self.warned_reference = False
-        self.tool_rounds = 0
         self.reported = False  # its latency was reported
         self.usage = None
 
@@ -106,7 +128,8 @@ class VoiceSession:
 
         self.memory = SessionMemory(settings)  # replaced by a fresh one every time a conversation starts
         self.runner = ToolRunner(settings, service, self.memory)
-        self.reply = None  # the answer being generated or still being played
+        self.reply = None  # the answer being generated
+        self._playing = []  # answers that have all arrived and are still being played by the browser
         self.replies = 0
         self.state = "idle"  # idle, connecting, listening, thinking, speaking
         self.awaiting_drain = False  # all audio of the answer arrived, the speakers are still playing it
@@ -120,7 +143,9 @@ class VoiceSession:
         self._caller_text = ""
         self._caller_shown = ""  # the same with card numbers removed (for the page and the log)
         self._caller_blocked = False  # the input guardrail blocked this turn: no tool runs for it
-        self._next_reply_asks = False  # the confirmation question will be read out in the next answer
+        self._turn_tool_calls = 0  # tool calls Gemini made for the caller's latest words
+        self._spoke_this_turn = False  # Gemini has made a sound since the caller's latest words
+        self._bubble_waiting = False  # the page has an empty pair of bubbles for words that have not arrived yet
         self._last_loud = None  # when the microphone last carried speech (perf_counter)
         self._levels = ([], [])  # microphone loudness of the loud and the quiet pieces in this turn
         self._tool_tasks = {}  # Gemini's call id -> running tool
@@ -223,7 +248,7 @@ class VoiceSession:
             self.played_ms = int(message.get("played_ms", 0))
         elif kind == "playback_drained":
             async with self._lock:
-                if self.reply is not None and self.awaiting_drain:
+                if self._playing and self.awaiting_drain:
                     await self._finish_playback_nolock()
         else:
             log.debug("unknown message from the browser: %s", kind)
@@ -250,10 +275,13 @@ class VoiceSession:
         self.memory = SessionMemory(self.settings)
         self.runner = ToolRunner(self.settings, self.service, self.memory)
         self.reply = None
+        self._playing = []
         self.replies = 0
         self.tokens_used = 0
         self._caller_open = False
-        self._next_reply_asks = False
+        self._turn_tool_calls = 0
+        self._spoke_this_turn = False
+        self._bubble_waiting = False
         self._last_loud = None
         self._levels = ([], [])
         self.last_activity = time.monotonic()
@@ -317,6 +345,7 @@ class VoiceSession:
             self._cancel_drain_watchdog()
             self.awaiting_drain = False
             self.reply = None
+            self._playing = []
             self._caller_open = False
             live, self.live = self.live, None  # the next conversation gets a new Gemini session: it never sees this one
             await self.send_event({"type": "clear"})
@@ -441,13 +470,20 @@ class VoiceSession:
 
     # ---------------------------------------------------------------- the caller
     async def _open_caller_turn(self):
+        """A caller turn is opened only by the caller's own words (an answer of Gemini never opens one)."""
         self._caller_open = True
         self._caller_text = self._caller_shown = ""
         self._caller_blocked = False
+        self._turn_tool_calls = 0
+        self._spoke_this_turn = False
         self.memory.turn_no += 1
-        await self.send_event({"type": "turn", "number": self.memory.turn_no})
+        if self._bubble_waiting:
+            self._bubble_waiting = False  # the page already has the bubbles for these words, above Gemini's answer
+        else:
+            await self.send_event({"type": "turn", "number": self.memory.turn_no})
 
     def _close_caller_turn(self):
+        self._bubble_waiting = False
         if not self._caller_open:
             return
         self._caller_open = False
@@ -461,12 +497,13 @@ class VoiceSession:
     async def _on_caller_words(self, text):
         """A piece of Gemini's transcript of the caller."""
         self.last_activity = time.monotonic()
-        reply = self.reply
-        if (reply is not None and reply.finished and self.awaiting_drain and self.settings.barge_in_enabled
-                and re.search(r"[^\W_]", text)):
+        if self._playing and self.reply is None and self.settings.barge_in_enabled and re.search(r"[^\W_]", text):
             # Gemini has finished this answer, so it does not interrupt it: the rest is only in our speakers.
             # This comes before the new turn opens, so the page marks the old answer as interrupted.
-            await self._stop_playback_nolock(reply, "the caller spoke while the end of the answer was still playing")
+            log.info("the caller spoke while the end of the answer was still playing: speakers stopped "
+                     "(played %.0f of %.0f ms)", self.played_ms, self._queued_ms)
+            await self._stop_speakers_nolock()
+            await self._set_state("listening")
         if not self._caller_open:
             await self._open_caller_turn()
         self.memory.hear(text)
@@ -480,15 +517,13 @@ class VoiceSession:
         await self.send_event({"type": "user_text", "text": tidy_numbers(self._caller_shown.strip())})
 
     # ---------------------------------------------------------------- Gemini's answer
+    # An answer is "being generated" (self.reply) from its first sound, text or tool call until turnComplete. Then it
+    # waits in self._playing until the speakers have played everything (drained) or were stopped. Only then is it
+    # known how much of it the caller heard, and only then is a read-back question in it judged.
     async def _answer(self):
         """The answer that is being generated now, started when its first sound, text or tool call arrives."""
-        reply = self.reply
-        if reply is not None and not reply.finished:
-            return reply
-        if reply is not None:
-            # the previous answer has all arrived but is still playing, and the new one plays after it. A question in it
-            # counts as heard if the caller has already heard most of it (they may be answering it right now).
-            self._end_reply_nolock(reply, heard=self._played_share(reply) >= self.settings.confirm_heard_share)
+        if self.reply is not None:
+            return self.reply
         spoke = self._last_loud
         after_speech = spoke is not None and time.perf_counter() - spoke < SPEECH_IS_RECENT_SECONDS
         timer = TurnTimer()
@@ -497,10 +532,12 @@ class VoiceSession:
         self.replies += 1
         reply = Reply(self.replies, timer, after_speech)
         reply.offset_ms = self._queued_ms  # sound still waiting in the browser ahead of this answer
-        reply.asks_to_confirm, self._next_reply_asks = self._next_reply_asks, False
         self.reply = reply
-        if not self._caller_open:
-            await self._open_caller_turn()
+        if not self._caller_open and not self._bubble_waiting:
+            # The caller's words have not arrived (yet): the page gets its pair of bubbles now, so that words arriving
+            # late still appear above this answer.
+            self._bubble_waiting = True
+            await self.send_event({"type": "turn"})
         await self.send_event({"type": "reply"})
         return reply
 
@@ -512,15 +549,22 @@ class VoiceSession:
             reply.timer.mark("first_audio")
             await self._set_state("speaking")
         reply.audio_bytes += len(pcm)
+        self._spoke_this_turn = True
         self._queued_ms += len(pcm) / (self.settings.gemini_output_sample_rate * 2) * 1000
         self.last_activity = time.monotonic()
         await self.send_audio(pcm)
 
     async def _on_answer_text(self, text):
-        """A piece of Gemini's transcript of its own answer. The output guardrail checks it. Gemini makes sound faster
-        than it is played, so this text normally arrives well before the caller hears the same words. The text can
-        also come after turnComplete: it then belongs to the answer that is still playing, never to a new one."""
-        reply = self.reply if self.reply is not None else await self._answer()
+        """A piece of Gemini's transcript of its own answer. Gemini makes this text from its sound, so it comes a little
+        after the sound, sometimes even after turnComplete: it then belongs to the answer that is still playing.
+        The output guardrail checks it. Gemini makes sound faster than it is played, so the text normally arrives
+        before the caller hears the same words."""
+        if self.reply is not None:
+            reply = self.reply
+        elif self._playing:
+            reply = self._playing[-1]
+        else:
+            reply = await self._answer()
         if reply.blocked:
             return
         reply.text += text
@@ -542,11 +586,8 @@ class VoiceSession:
         log.warning("reply %d stopped by the output guardrail (%s); %.0f of %.0f ms of its sound had been played: %r",
                     reply.number, verdict.reason, self.played_ms - reply.offset_ms,
                     reply.audio_ms(self.settings.gemini_output_sample_rate), reply.text[-120:])
-        await self.send_event({"type": "clear"})  # silence the speakers at once
-        self._speakers_emptied()
-        await self.send_event({"type": "interrupted"})
-        if reply.finished:  # all of it had arrived already: end it now and ask for the replacement
-            self._end_reply_nolock(reply, heard=False)
+        await self._stop_speakers_nolock()  # silence the speakers at once
+        if reply is not self.reply:  # it had all arrived already: ask for the replacement now
             self._send_replacement(reply)
             await self._set_state("listening")
 
@@ -558,104 +599,128 @@ class VoiceSession:
     async def _on_turn_complete(self):
         reply = self.reply
         self._close_caller_turn()
-        if reply is None or reply.finished:
+        if reply is None:
             return
         reply.finished = True
+        self.reply = None
         log.info("reply %d said: %s", reply.number, tidy_numbers(reply.text.strip()) or "(nothing)")
         if reply.usage:
             log.info("reply %d tokens: %s", reply.number, reply.usage)
         if reply.blocked:
-            self._end_reply_nolock(reply, heard=False)
+            self._check_read_back_nolock(reply, played_all=False)
             self._send_replacement(reply)
             await self._set_state("listening")
             return
-        if reply.audio_bytes == 0:
-            # nothing was said (for example Gemini ended its turn right after a tool call): if the confirmation
-            # question belongs to this answer, Gemini reads it out in the next one
-            self._next_reply_asks = self._next_reply_asks or reply.asks_to_confirm
-            reply.asks_to_confirm = False
-            self._end_reply_nolock(reply, heard=False)
-            await self._set_state("listening")
+        if reply.audio_bytes == 0:  # nothing was said, for example Gemini ended its turn right after a tool call
+            if not self._playing:
+                await self._set_state("listening")
             return
-        # all audio has arrived; tell the browser no more is coming and wait for it to finish playing
+        # all of its sound has arrived; tell the browser no more is coming and wait for it to finish playing
+        self._playing.append(reply)
         await self.send_event({"type": "audio_end"})
         self.awaiting_drain = True
-        still_to_play = reply.offset_ms + reply.audio_ms(self.settings.gemini_output_sample_rate) - self.played_ms
-        wait = max(still_to_play, 0) / 1000 + self.settings.drain_grace_seconds
-        self._drain_task = asyncio.create_task(self._drain_watchdog(reply, wait))
+        self._cancel_drain_watchdog()
+        wait = max(self._queued_ms - self.played_ms, 0) / 1000 + self.settings.drain_grace_seconds
+        self._drain_task = asyncio.create_task(self._drain_watchdog(wait))
 
     async def _on_interrupted(self):
         """Gemini heard the caller start talking while it was still generating, and stopped."""
-        reply = self.reply
+        reply, self.reply = self.reply, None
         self._close_caller_turn()
         if reply is None:
+            if self._playing:  # all of the answer had arrived; only its end was still playing
+                log.info("barge-in: speakers stopped (played %.0f of %.0f ms)", self.played_ms, self._queued_ms)
+                await self._stop_speakers_nolock()
+                await self._set_state("listening")
             return
-        if reply.finished:  # all of it had arrived; only its end was still playing
-            await self._stop_playback_nolock(reply, "barge-in")
-            return
+        reply.finished = True
         log.info("barge-in on reply %d (played %.0f of %.0f ms)", reply.number, self.played_ms - reply.offset_ms,
                  reply.audio_ms(self.settings.gemini_output_sample_rate))
-        await self.send_event({"type": "clear"})
-        self._speakers_emptied()
-        await self.send_event({"type": "interrupted"})
-        self._end_reply_nolock(reply, heard=False)  # it was cut off while being generated: the question was not complete
+        self._check_read_back_nolock(reply, played_all=False)  # judged before the count of what was played is reset
+        await self._stop_speakers_nolock()
         self._send_replacement(reply)
         await self._set_state("listening")
 
-    async def _stop_playback_nolock(self, reply, why):
-        """The caller talks over the end of an answer that is still playing in the browser."""
-        played_share = self._played_share(reply)
-        log.info("%s: speakers stopped (reply %d, played %.0f%% of %.0f ms)", why, reply.number, played_share * 100,
-                 reply.audio_ms(self.settings.gemini_output_sample_rate))
+    async def _stop_speakers_nolock(self):
+        """Silence the speakers now. Every answer that was still playing is judged by how much of it was played."""
+        for reply in self._playing:
+            self._check_read_back_nolock(reply, played_all=False)
+        self._playing = []
+        self.awaiting_drain = False
+        self._cancel_drain_watchdog()
+        if self.reply is not None:
+            self.reply.offset_ms = -self.reply.audio_ms(self.settings.gemini_output_sample_rate)  # its sound so far is gone
         await self.send_event({"type": "clear"})
         self._speakers_emptied()
         await self.send_event({"type": "interrupted"})
-        self._end_reply_nolock(reply, heard=played_share >= self.settings.confirm_heard_share)
-        await self._set_state("listening")
 
     async def _finish_playback_nolock(self):
-        self._end_reply_nolock(self.reply, heard=True)
+        """The speakers have played everything they were given."""
+        for reply in self._playing:
+            self._check_read_back_nolock(reply, played_all=True)
+        self._playing = []
+        self.awaiting_drain = False
+        self._cancel_drain_watchdog()
+        if self.reply is not None:
+            # an answer still being generated plays on, and the browser starts counting again from zero
+            self.reply.offset_ms = -self.reply.audio_ms(self.settings.gemini_output_sample_rate)
         self._speakers_emptied()
-        await self._set_state("listening")
-
-    def _played_share(self, reply):
-        """How much of this answer the caller has heard. The browser counts everything it played since its player was
-        last empty, which can include the end of the answer before this one."""
-        played = self.played_ms - reply.offset_ms
-        return played / max(reply.audio_ms(self.settings.gemini_output_sample_rate), 1.0)
+        if self.reply is None:
+            await self._set_state("listening")
 
     def _speakers_emptied(self):
         """The browser's player was cleared or has played everything: its count starts again from zero."""
         self.played_ms = 0
         self._queued_ms = 0.0
 
-    def _end_reply_nolock(self, reply, heard):
-        """The answer is over. If it read out the confirmation question, decide whether the caller heard it."""
-        if reply is not self.reply:
-            return
-        self.reply = None
-        self.awaiting_drain = False
-        self._cancel_drain_watchdog()
+    def _check_read_back_nolock(self, reply, played_all):
+        """If this answer read out the confirmation question, decide whether the caller has heard enough of it.
+        The answer that reads it is found by its words: a filler and the tool call usually come in an answer before it."""
         pending = self.memory.pending
-        if not reply.asks_to_confirm or pending is None:
+        if pending is None or pending.heard_at is not None:
             return
         wanted = _content_words(pending.question)
         share = len(wanted & _content_words(reply.text)) / max(len(wanted), 1)
-        differs = _read_back_differs(pending.question, reply.text)
-        if heard and share >= self.settings.read_back_min_share and not differs:
-            self.memory.question_heard()
-            log.info("the caller has heard the confirmation question (%.0f%% of its words were read out)", share * 100)
+        if share < self.settings.read_back_present_share:
+            return  # not the question (a filler, or another sentence): the question is still to come
+        if reply.blocked:
+            heard, how = False, "the answer was stopped by the output guardrail"
+        elif played_all:
+            heard = share >= self.settings.read_back_min_share
+            how = "it was played to the end" if heard else "it was not read out word for word"
         else:
-            why = "cut short" if not heard else ("read out with a different time or day" if differs else "not read out")
-            log.info("the confirmation question was %s (%.0f%% of its words were said: %r): it will be asked again",
-                     why, share * 100, reply.text.strip()[-120:])
+            heard, how = self._details_heard(reply, pending)
+        if heard and _read_back_differs(pending.question, reply.text):
+            heard, how = False, "it was read out with a different time, date or day"
+        if heard:
+            self.memory.question_heard()
+            log.info("the caller has heard the confirmation question: %s (%.0f%% of its words were said)", how, share * 100)
+        else:
+            log.info("the confirmation question will be asked again: %s (%.0f%% of its words were said: %r)",
+                     how, share * 100, reply.text.strip()[-120:])
             self.memory.pending = None
 
-    async def _drain_watchdog(self, reply, wait):
+    def _details_heard(self, reply, pending):
+        """Was the question played at least up to the end of its service, day and time? Then a yes spoken over the rest
+        (the name, the phone number, "Shall I book it?") counts. Where the details end in the sound is estimated from
+        the spoken length of Gemini's own text."""
+        details = _details_part(pending.question)
+        wanted = _content_words(details)
+        if len(wanted & _content_words(reply.text)) / max(len(wanted), 1) < self.settings.read_back_min_share:
+            return False, "it was cut short before its service, day and time were said"
+        said = _speaking_units(reply.text)
+        before = max(said - _speaking_units(pending.question), 0)  # anything Gemini said before the question itself
+        needed_ms = (before + _speaking_units(details)) / max(said, 1) * reply.audio_ms(self.settings.gemini_output_sample_rate)
+        played_ms = self.played_ms - reply.offset_ms
+        if played_ms >= needed_ms:
+            return True, f"talked over after {played_ms:.0f} ms, the service, day and time end at about {needed_ms:.0f} ms"
+        return False, f"cut short after {played_ms:.0f} ms, before the service, day and time ended (about {needed_ms:.0f} ms)"
+
+    async def _drain_watchdog(self, wait):
         """Safety net in case the browser never reports that it finished playing."""
         await asyncio.sleep(wait)
         async with self._lock:
-            if reply is self.reply and self.awaiting_drain:
+            if self._playing and self.awaiting_drain:
                 log.warning("the browser never reported the end of playback, finishing anyway")
                 await self._finish_playback_nolock()
 
@@ -667,12 +732,15 @@ class VoiceSession:
     # ---------------------------------------------------------------- tools
     async def _on_tool_call(self, tool_call):
         reply = await self._answer()
-        reply.tool_rounds += 1
+        calls = tool_call.get("functionCalls") or []
+        if not self._spoke_this_turn:
+            log.warning("Gemini called %s without saying a filler sentence first", ", ".join(c.get("name", "?") for c in calls))
         reply.timer.mark("tools_started")
         await self._set_state("thinking")
         ctx = ToolContext(emit=self.send_event, turn_no=self.memory.turn_no, blocked=self._caller_blocked)
-        too_many = reply.tool_rounds > self.settings.max_tool_rounds
-        for call in tool_call.get("functionCalls") or []:
+        for call in calls:
+            self._turn_tool_calls += 1
+            too_many = self._turn_tool_calls > self.settings.max_tool_rounds
             # every call answers Gemini as soon as it is finished, so one slow tool never holds up another
             self._tool_tasks[call.get("id")] = asyncio.create_task(self._run_tool(call, ctx, reply, too_many))
 
@@ -680,8 +748,9 @@ class VoiceSession:
         call_id, name = call.get("id"), call.get("name", "")
         try:
             if too_many:
-                log.warning("Gemini kept asking for tools in one answer; telling it to answer now")
-                result = {"ok": False, "error": "TOO_MANY_TOOL_CALLS", "message": "Stop using tools now and answer the caller."}
+                log.warning("Gemini kept calling tools for the caller's last words; telling it to answer now")
+                result = {"ok": False, "error": "TOO_MANY_TOOL_CALLS",
+                          "message": "Stop using tools now. Speak to the caller and wait for their answer."}
             else:
                 result = await self.runner.run(name, call.get("args") or {}, ctx)
         except asyncio.CancelledError:
@@ -689,11 +758,6 @@ class VoiceSession:
             return
         finally:
             self._tool_tasks.pop(call_id, None)
-        if result.get("error") == "CONFIRMATION_REQUIRED":
-            if self.reply is not None and not self.reply.finished:
-                self.reply.asks_to_confirm = True
-            else:
-                self._next_reply_asks = True  # Gemini ended its turn before speaking; the question comes in the next answer
         reply.timer.mark("tools_done")
         if self.live is not None:
             self.live.send_tool_response([{"id": call_id, "name": name, "response": for_model(result)}])
@@ -713,9 +777,11 @@ class VoiceSession:
 
     # ================================================================ playback reports from the browser
     async def _on_playback_started(self):
-        reply = self.reply
-        if reply is None or reply.reported:
+        # the first answer with sound that has not been reported yet: the browser starts playing them in order
+        waiting = [r for r in [*self._playing, self.reply] if r is not None and r.audio_bytes and not r.reported]
+        if not waiting:
             return
+        reply = waiting[0]
         reply.reported = True
         reply.timer.mark("audio_played")
         metrics = {"type": "metrics", "after_speech": reply.after_speech}

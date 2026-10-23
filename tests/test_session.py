@@ -109,16 +109,16 @@ class Call:
         await until(lambda: len(self.gemini.audio) >= before + 15 * 1280)
 
     async def played(self, share=1.0):
-        """The browser plays the answer: all of it (share 1.0) or only a part, as playback progress reports."""
-        reply = self.session.reply
+        """The browser plays what it was given: everything (share 1.0), or this share of the newest answer."""
         self.browser.control({"type": "playback_started"})
         if share >= 1.0:
             self.browser.control({"type": "playback_drained"})
-            await until(lambda: self.session.reply is not reply)
+            await until(lambda: not self.session.awaiting_drain)
         else:
-            total = reply.audio_ms(self.settings.gemini_output_sample_rate)
-            self.browser.control({"type": "playback_progress", "played_ms": int(total * share)})
-            await until(lambda: self.session.played_ms == int(total * share))
+            reply = self.session.reply or self.session._playing[-1]
+            played = int(reply.offset_ms + reply.audio_ms(self.settings.gemini_output_sample_rate) * share)
+            self.browser.control({"type": "playback_progress", "played_ms": played})
+            await until(lambda: self.session.played_ms == played)
 
     async def read_back(self, question):
         """Gemini reads the code's question out, finishes, and the caller hears all of it."""
@@ -239,7 +239,7 @@ def test_a_yes_over_the_start_of_the_question_does_not_count():
         await call.gemini.say(asked["response"]["say"], audio_ms=3000)
         await call.gemini.finish()
         await until(lambda: call.session.awaiting_drain)
-        await call.played(share=0.3)  # the caller heard only the start of it...
+        await call.played(share=0.1)  # the caller heard only "Just to confirm"...
         await call.gemini.hear(" Yes.")  # ...and said yes over the rest
         await until(lambda: call.browser.of_type("clear"))  # the speakers were stopped at once
         kinds = [event["type"] for event in call.browser.events]
@@ -248,6 +248,65 @@ def test_a_yes_over_the_start_of_the_question_does_not_count():
         assert call.session.memory.pending is None  # the question no longer counts
         again = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
         assert again["response"]["error"] == "CONFIRMATION_REQUIRED" and call.google.events == {}
+
+    run(scenario)
+
+
+def test_a_yes_over_the_name_and_phone_number_counts():
+    async def scenario(call):
+        asked = await call.gemini.call_tool("create_booking", BOOK, call_id="c1")
+        await call.gemini.say(asked["response"]["say"], audio_ms=3000)
+        await call.gemini.finish()
+        await until(lambda: call.session.awaiting_drain)
+        await call.played(share=0.5)  # the service, day and time were heard; the phone number was still being read
+        await call.gemini.hear(" Yes, go ahead.")
+        done = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
+        assert done["response"]["ok"] and len(call.google.events) == 1
+
+    run(scenario)
+
+
+def test_gemini_cutting_itself_off_after_the_details_still_lets_the_yes_count():
+    async def scenario(call):
+        asked = await call.gemini.call_tool("create_booking", BOOK, call_id="c1")
+        await call.gemini.say(asked["response"]["say"], audio_ms=3000)  # still being generated (no turnComplete)
+        await until(lambda: call.session.reply is not None and call.session.reply.text)
+        await call.played(share=0.5)
+        await call.gemini.interrupt()  # Gemini heard the caller start to talk
+        await call.gemini.hear(" Yes.")
+        done = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
+        assert done["response"]["ok"] and len(call.google.events) == 1
+
+    run(scenario)
+
+
+def test_the_question_after_a_filler_answer_is_the_one_that_counts():
+    async def scenario(call):
+        await call.gemini.hear(" My name is Ali Raza and my number is 0300 1234567.")
+        await call.gemini.say("Alright, let me put that together.", audio_ms=1500)  # the filler...
+        asked = await call.gemini.call_tool("create_booking", BOOK, call_id="c1")  # ...the tool call...
+        await call.gemini.finish()  # ...and Gemini ends its turn
+        await until(lambda: call.session.awaiting_drain)
+        await call.read_back(asked["response"]["say"])  # the question comes in the next answer
+        assert call.session.memory.pending.heard_at is not None
+        await call.gemini.hear(" Yes, go ahead.")
+        done = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
+        assert done["response"]["ok"] and len(call.google.events) == 1
+
+    run(scenario)
+
+
+def test_answers_of_gemini_never_open_a_caller_turn():
+    async def scenario(call):
+        await call.gemini.hear(" Do you have anything on Tuesday?")
+        await call.gemini.say("Let me check the calendar for you.")
+        await call.gemini.call_tool("find_available_slots", SLOTS, call_id="c1")
+        await call.gemini.finish()
+        await call.gemini.say("We have 9 AM or 10 AM.")  # the answer after the tool
+        await call.gemini.finish()
+        await until(lambda: len(call.browser.of_type("reply")) == 2)
+        assert call.session.memory.turn_no == 1  # still the caller's one turn
+        assert len([e for e in call.browser.of_type("turn") if "number" in e]) == 1
 
     run(scenario)
 
@@ -276,9 +335,9 @@ def test_a_question_queued_behind_another_answer_is_timed_from_its_own_start():
         await call.gemini.finish()
         await until(lambda: call.session.awaiting_drain)
         call.browser.control({"type": "playback_started"})
-        call.browser.control({"type": "playback_progress", "played_ms": 6000})  # 4 s of the first, 2 s of the question
-        await until(lambda: call.session.played_ms == 6000)
-        await call.gemini.hear(" Yes.")  # said a third of the way into the question
+        call.browser.control({"type": "playback_progress", "played_ms": 5000})  # 4 s of the first, 1 s of the question
+        await until(lambda: call.session.played_ms == 5000)
+        await call.gemini.hear(" Yes.")  # said before the question's day and time
         await until(lambda: call.browser.of_type("clear"))
         again = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
         assert again["response"]["error"] == "CONFIRMATION_REQUIRED" and call.google.events == {}
@@ -346,6 +405,7 @@ def test_the_read_back_check_finds_a_different_time_date_or_day():
 def test_an_interruption_stops_the_speakers_and_the_next_sound_is_a_new_answer():
     async def scenario(call):
         await call.gemini.say("We have 9 AM, 10 AM and 11 AM tomorrow, and on Wednesday", audio_ms=4000)
+        await until(lambda: call.session.reply is not None)
         first = call.session.reply
         await call.gemini.interrupt()
         await until(lambda: call.browser.of_type("interrupted"))

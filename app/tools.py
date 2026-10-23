@@ -1,21 +1,22 @@
-"""The tools the model may call, and the gate every call must pass.
+"""The tools Gemini may call, and the gate every call must pass.
 
-The model never touches the calendar. It asks, and ToolRunner decides:
+Gemini never touches the calendar. It asks, and ToolRunner decides:
   - the input is checked against the schema (bad input comes back as a clear error);
-  - READ tools run at once, even during an early "draft" answer, because they change nothing;
-  - WRITE tools (create, reschedule, cancel) wait until the caller has really finished speaking, and
-    only run if the caller said "yes" to this exact action in an EARLIER turn. Otherwise the action is
-    parked as "pending" and the system itself reads it back and asks for confirmation.
+  - READ tools run at once, because they change nothing;
+  - WRITE tools (create, reschedule, cancel) only run if the caller said "yes" to this exact action AFTER they had
+    heard the question. Otherwise the action is parked as "pending" and the result carries the read-back question,
+    written by the code, for Gemini to read out word for word;
+  - in a turn the input guardrail blocked, no tool runs at all.
 """
 import asyncio
 import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from .booking.calendar_client import CalendarError
 from .booking.models import (
@@ -44,15 +45,16 @@ TOOLS = {spec.name: spec for spec in [
              "Find free appointment times for a service over one or more days. Use this to offer times."),
     ToolSpec("create_booking", CreateBookingArgs,
              "Book an appointment. Call it as soon as you have the service, the time, the name and the phone number, "
-             "without asking the caller first: the system reads the details back and asks them to confirm. "
-             "After the caller says yes, call it again with the same details.", write=True),
+             "without asking the caller first. The result's say field is the confirmation question: read it out word for "
+             "word. After the caller says yes, call it again with the same details.", write=True),
     ToolSpec("get_booking", BookingLookupArgs, "Look up a booking by reference and phone number."),
     ToolSpec("reschedule_booking", RescheduleArgs,
              "Move a booking to a new day and time. Call it as soon as you have the new time, without asking the caller "
-             "first: the system asks them to confirm. After the yes, call it again with the same details.", write=True),
+             "first. Read the say field of the result out word for word. After the yes, call it again with the same details.",
+             write=True),
     ToolSpec("cancel_booking", BookingLookupArgs,
-             "Cancel a booking. Call it as soon as the caller asks to cancel, without asking them first: the system "
-             "asks them to confirm. After the yes, call it again with the same details.", write=True),
+             "Cancel a booking. Call it as soon as the caller asks to cancel, without asking them first. Read the say "
+             "field of the result out word for word. After the yes, call it again with the same details.", write=True),
 ]}
 
 NEEDS_VERIFICATION = {"get_booking", "reschedule_booking", "cancel_booking"}
@@ -61,42 +63,44 @@ NEEDS_VERIFICATION = {"get_booking", "reschedule_booking", "cancel_booking"}
 @dataclass
 class ToolContext:
     """What a tool call needs to know about the turn it belongs to."""
-    gate: asyncio.Event  # opens when the caller has really finished speaking
-    user_text: str
     emit: Callable  # async function that sends a small event to the browser
-    turn_no: int = 0  # set at the moment the turn is committed
-    deferred: list = field(default_factory=list)  # results of tools that finished before the caller did
+    turn_no: int = 0
+    blocked: bool = False  # the input guardrail blocked what the caller said in this turn
 
 
-def _inline_refs(schema, definitions):
-    """Pydantic puts nested models under $defs; write them in place and drop the noisy titles."""
-    if isinstance(schema, dict):
-        if "$ref" in schema:
-            return _inline_refs(definitions[schema["$ref"].split("/")[-1]], definitions)
-        return {k: _inline_refs(v, definitions) for k, v in schema.items() if k not in ("title", "$defs")}
+def _gemini_schema(schema, definitions):
+    """Pydantic's JSON Schema in the plain form Gemini accepts: nested models written in place, an optional field
+    (anyOf with null) as just its type, and no titles or defaults."""
     if isinstance(schema, list):
-        return [_inline_refs(item, definitions) for item in schema]
-    return schema
+        return [_gemini_schema(item, definitions) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    if "$ref" in schema:
+        return _gemini_schema(definitions[schema["$ref"].split("/")[-1]], definitions)
+    if "anyOf" in schema:
+        kept = [option for option in schema["anyOf"] if option.get("type") != "null"]
+        if len(kept) == 1:
+            merged = {**kept[0], **{k: v for k, v in schema.items() if k == "description"}}
+            return _gemini_schema(merged, definitions)
+    return {k: _gemini_schema(v, definitions) for k, v in schema.items() if k not in ("title", "$defs", "default")}
 
 
 def build_definitions():
-    """The tool list in the format OpenAI expects, generated from the same classes that validate the input."""
+    """The tool list in the format Gemini expects (functionDeclarations), generated from the same classes that
+    validate the input."""
     definitions = []
     for spec in TOOLS.values():
+        declaration = {"name": spec.name, "description": spec.description}
         schema = spec.model.model_json_schema()
-        definitions.append({
-            "type": "function",
-            "name": spec.name,
-            "description": spec.description,
-            "parameters": _inline_refs(schema, schema.get("$defs", {})),
-            "strict": False,
-        })
+        if schema.get("properties"):  # a tool without input gets no parameters at all
+            declaration["parameters"] = _gemini_schema(schema, schema.get("$defs", {}))
+        definitions.append(declaration)
     return definitions
 
 
 def for_model(result):
-    """The compact JSON text the model gets back. Internal fields stay out."""
-    return json.dumps({k: v for k, v in result.items() if k not in ("event_id", "say")}, separators=(",", ":"))
+    """What Gemini gets back. Internal fields stay out; the say sentence stays in, Gemini reads it out."""
+    return {k: v for k, v in result.items() if k != "event_id"}
 
 
 def _word_pattern(words):
@@ -114,39 +118,20 @@ class ToolRunner:
         self.definitions = build_definitions()
         self._yes = _word_pattern(settings.confirm_words)
         self._no = _word_pattern(settings.refuse_words)
-        words = lambda phrases: {word for phrase in phrases for word in phrase.replace("\u2019", "'").split()}
-        self._refuse_tokens = words(settings.refuse_words)
-        self._quick_yes_words = words(settings.confirm_words) | set(settings.quick_extra_words)
-        self._quick_no_words = self._refuse_tokens | set(settings.quick_extra_words)
 
     @staticmethod
     def is_write(name):
         return name in TOOLS and TOOLS[name].write
 
-    def is_affirmative(self, text):
-        """Did the caller say yes? A "no" or "wait" in the same sentence cancels it."""
-        cleaned = re.sub(r"[^a-z' ]", " ", text.lower().replace("\u2019", "'"))
-        if self._no and self._no.search(cleaned):
-            return False
-        return bool(self._yes and self._yes.search(cleaned))
+    def _cleaned(self, text):
+        return re.sub(r"[^a-z' ]", " ", text.lower().replace("’", "'"))
 
-    def quick_decision(self, ctx):
-        """'yes', 'no' or None. A reply that is ONLY a plain yes (or no) to the question just asked can be handled by
-        the code at once, without asking the model what to do. Anything with other words in it returns None."""
-        pending = self.memory.pending
-        upcoming_turn = ctx.turn_no or self.memory.turn_no + 1
-        if pending is None or pending.turn_no != upcoming_turn - 1:
-            return None
-        if time.monotonic() - pending.created >= self.settings.confirm_ttl_seconds:
-            return None
-        words = re.findall(r"[a-z']+", ctx.user_text.lower().replace("\u2019", "'"))
-        if not words or len(words) > self.settings.quick_answer_max_words:
-            return None
-        if all(word in self._quick_yes_words for word in words) and self.is_affirmative(ctx.user_text):
-            return "yes"
-        if all(word in self._quick_no_words for word in words) and any(word in self._refuse_tokens for word in words):
-            return "no"
-        return None
+    def is_refusal(self, text):
+        return bool(self._no and self._no.search(self._cleaned(text)))
+
+    def is_affirmative(self, text):
+        """Did the caller say yes? A "no" or "wait" in the same answer cancels it."""
+        return not self.is_refusal(text) and bool(self._yes and self._yes.search(self._cleaned(text)))
 
     def success_reply(self, tool, result):
         """The sentence to say after a change has really been made. Written by the code from the real result."""
@@ -159,20 +144,22 @@ class ToolRunner:
         return template.format(service=result.get("service"), when=result.get("label"),
                                reference=spell_digits(str(result.get("booking_reference") or "")))
 
-    def expects_confirmed_change(self, name, ctx):
-        """Will this change tool probably run for real, because the caller is saying yes to the question just asked?
-        Used before the model has finished writing the arguments, so it can only look at what the caller said."""
-        pending = self.memory.pending
-        upcoming_turn = ctx.turn_no or self.memory.turn_no + 1
-        return (
-            pending is not None
-            and pending.tool == name
-            and pending.turn_no == upcoming_turn - 1
-            and self.is_affirmative(ctx.user_text)
-        )
+    async def caller_said_yes(self):
+        """Did the caller say yes after hearing the question? Gemini can understand the answer a moment before its
+        text of it reaches us, so wait up to LIVE_TRANSCRIPT_WAIT_MS for the text."""
+        deadline = time.monotonic() + self.settings.live_transcript_wait_ms / 1000
+        while True:
+            words = self.memory.words_since(self.memory.pending.heard_at)
+            if self.is_affirmative(words):
+                return True
+            if self.is_refusal(words) or time.monotonic() >= deadline:
+                log.info("no yes from the caller after the question (heard %r)", words.strip())
+                return False
+            await asyncio.sleep(0.05)
 
     # ================================================================ the one entry point
     async def run(self, name, raw_arguments, ctx):
+        """raw_arguments: a dict (what Gemini sends) or a JSON string."""
         started = time.perf_counter()
         args = None
         recorded = False  # True when a finished change already updated the memory itself
@@ -180,9 +167,12 @@ class ToolRunner:
             spec = TOOLS.get(name)
             if spec is None:
                 result = {"ok": False, "error": "UNKNOWN_TOOL", "message": f"There is no tool called {name}."}
+            elif ctx.blocked:
+                result = {"ok": False, "error": "BLOCKED_BY_SAFETY",
+                          "message": f"The safety filter blocked what the caller said. Do not do it. Say: {self.settings.input_block_reply}"}
             else:
                 args = self._parse(spec, raw_arguments)
-                result, recorded = await self._dispatch(spec, args, ctx)
+                result, recorded = await self._dispatch(spec, args)
         except ValueError as exc:  # bad JSON or bad fields
             result = {"ok": False, "error": "INVALID_INPUT", "message": str(exc)}
         except BookingError as exc:
@@ -198,11 +188,7 @@ class ToolRunner:
             result = {"ok": False, "error": "INTERNAL_ERROR", "message": "Something went wrong on our side."}
 
         if not recorded:
-            if ctx.gate.is_set():
-                self.record(name, args, result)
-            else:
-                # an early draft must not change the memory unless the draft is really used (see Turn.commit)
-                ctx.deferred.append((name, args, result))
+            self.record(name, args, result)
         elapsed = (time.perf_counter() - started) * 1000
         log.info("tool %s -> %s (%.0f ms)", name, result.get("error", "ok"), elapsed)
         try:
@@ -214,10 +200,13 @@ class ToolRunner:
     # ================================================================ steps
     @staticmethod
     def _parse(spec, raw_arguments):
-        try:
-            data = json.loads(raw_arguments) if raw_arguments and raw_arguments.strip() else {}
-        except json.JSONDecodeError:
-            raise ValueError("The arguments were not valid JSON.")
+        if isinstance(raw_arguments, dict):
+            data = raw_arguments
+        else:
+            try:
+                data = json.loads(raw_arguments) if raw_arguments and raw_arguments.strip() else {}
+            except json.JSONDecodeError:
+                raise ValueError("The arguments were not valid JSON.")
         try:
             return spec.model.model_validate(data)
         except ValidationError as exc:
@@ -233,7 +222,7 @@ class ToolRunner:
         if result.get("ok"):
             self.memory.achieved.add(name)
 
-    async def _dispatch(self, spec, args, ctx):
+    async def _dispatch(self, spec, args):
         """Returns (result, recorded)."""
         if spec.name in NEEDS_VERIFICATION and self.memory.verify_failures >= self.settings.max_verify_failures:
             return {"ok": False, "error": "TOO_MANY_ATTEMPTS",
@@ -241,26 +230,24 @@ class ToolRunner:
         if not spec.write:
             method = getattr(self.service, spec.name)
             return await asyncio.wait_for(method(args), self.settings.tool_timeout_seconds), False
-        return await self._run_write(spec, args, ctx)
+        return await self._run_write(spec, args)
 
-    async def _run_write(self, spec, args, ctx):
-        # Step 1, which may happen during the early draft: check everything against the live calendar.
-        # Nothing is changed here, so a discarded draft costs nothing.
-        # The confirmation QUESTION is checked against the in-memory calendar window; the check before the real
-        # change (the caller is saying yes) always asks Google.
-        plan = await self.service.prepare(spec.name, args, self.memory.verified_booking, fresh=self.expects_confirmed_change(spec.name, ctx))
+    async def _run_write(self, spec, args):
+        # Step 1: check everything against the calendar. Nothing is changed here. The confirmation QUESTION is checked
+        # against the in-memory calendar window; the check right before the real change always asks Google.
+        pending = self.memory.pending
+        answering = pending is not None and pending.tool == spec.name and pending.heard_at is not None
+        plan = await self.service.prepare(spec.name, args, self.memory.verified_booking, fresh=answering)
         if plan.result is not None:  # an error, or a retry of something already done: nothing to confirm
             return plan.result, False
 
-        upcoming_turn = ctx.turn_no or self.memory.turn_no + 1
-        confirmed = self.memory.pending_is_confirmable(plan.key, upcoming_turn) and self.is_affirmative(ctx.user_text)
-
-        await ctx.gate.wait()  # Step 2, the real change, waits until the caller has really finished speaking
+        # Step 2: the real change needs a yes to exactly this action, said after the caller heard the question.
+        confirmed = self.memory.pending_is_confirmable(plan.key) and await self.caller_said_yes()
         if not confirmed:
-            self.memory.set_pending(plan.key, spec.name, plan.question, args.model_dump_json())
+            self.memory.set_pending(plan.key, spec.name, plan.question)
             log.info("%s is waiting for the caller's yes", spec.name)
             return {"ok": False, "error": "CONFIRMATION_REQUIRED", "say": plan.question,
-                    "message": "Nothing has been done yet. The caller is being asked to confirm."}, False
+                    "message": "Nothing has been done yet. Read the say sentence to the caller word for word and wait for the answer."}, False
         self.memory.pending = None
 
         # From here on the change must finish even if the caller interrupts. The memory is therefore
@@ -274,6 +261,6 @@ class ToolRunner:
         change.add_done_callback(remember)
         result = await asyncio.shield(change)
         if result.get("ok"):
-            # No second model call is needed to announce it: the code says it, with the real numbers.
+            # The code writes the announcement from the real result, so the numbers are always right.
             result["say"] = self.success_reply(spec.name, result)
         return result, True

@@ -46,7 +46,7 @@ def test_the_setup_carries_the_model_voice_prompt_tools_and_transcripts():
         assert setup["systemInstruction"]["parts"][0]["text"] == "You are a receptionist."
         assert setup["tools"][0]["functionDeclarations"][0]["name"] == "get_services"
         assert setup["inputAudioTranscription"] == {} and setup["outputAudioTranscription"] == {}
-        assert setup["realtimeInputConfig"]["automaticActivityDetection"] == {"silenceDurationMs": 500}
+        assert setup["realtimeInputConfig"]["automaticActivityDetection"] == {"silenceDurationMs": 700}
         assert setup["realtimeInputConfig"]["activityHandling"] == "START_OF_ACTIVITY_INTERRUPTS"
         assert setup["sessionResumption"] == {} and "slidingWindow" in setup["contextWindowCompression"]
         assert fake.keys == ["test-value"] and live.is_open()
@@ -63,7 +63,7 @@ def test_optional_turn_settings_are_only_sent_when_set():
                                         live_end_sensitivity="END_SENSITIVITY_HIGH")
         config = fake.setups[0]["setup"]["realtimeInputConfig"]
         assert config["activityHandling"] == "NO_INTERRUPTION"  # barge-in off: the answer always finishes
-        assert config["automaticActivityDetection"] == {"silenceDurationMs": 500, "prefixPaddingMs": 120,
+        assert config["automaticActivityDetection"] == {"silenceDurationMs": 700, "prefixPaddingMs": 120,
                                                         "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH"}
         await live.close()
         await fake.stop()

@@ -1,4 +1,4 @@
-"""A free check of the Google Calendar settings. It does not use OpenAI, Deepgram or ElevenLabs.
+"""A free check of the Google Calendar settings. It does not use Gemini.
 
 Run it from the project folder:
     python -m scripts.check_calendar            checks the token and the calendar ID (read only)

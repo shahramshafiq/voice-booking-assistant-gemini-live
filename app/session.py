@@ -420,13 +420,14 @@ class VoiceSession:
     async def _on_caller_words(self, text):
         """A piece of Gemini's transcript of the caller."""
         self.last_activity = time.monotonic()
-        if not self._caller_open:
-            await self._open_caller_turn()
         reply = self.reply
         if (reply is not None and reply.finished and self.awaiting_drain and self.settings.barge_in_enabled
                 and re.search(r"[^\W_]", text)):
-            # Gemini has finished this answer, so it does not interrupt it: the rest is only in our speakers
+            # Gemini has finished this answer, so it does not interrupt it: the rest is only in our speakers.
+            # This comes before the new turn opens, so the page marks the old answer as interrupted.
             await self._stop_playback_nolock(reply, "the caller spoke while the end of the answer was still playing")
+        if not self._caller_open:
+            await self._open_caller_turn()
         self.memory.hear(text)
         self._caller_text += text
         verdict = self.input_rail.check(self._caller_text)

@@ -235,6 +235,9 @@ def test_a_yes_over_the_start_of_the_question_does_not_count():
         await call.played(share=0.3)  # the caller heard only the start of it...
         await call.gemini.hear(" Yes.")  # ...and said yes over the rest
         await until(lambda: call.browser.of_type("clear"))  # the speakers were stopped at once
+        kinds = [event["type"] for event in call.browser.events]
+        last_turn = max(index for index, kind in enumerate(kinds) if kind == "turn")
+        assert kinds.index("interrupted") < last_turn  # the old answer is marked first, then the new turn opens
         assert call.session.memory.pending is None  # the question no longer counts
         again = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
         assert again["response"]["error"] == "CONFIRMATION_REQUIRED" and call.google.events == {}

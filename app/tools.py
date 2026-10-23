@@ -70,7 +70,8 @@ class ToolContext:
 
 def _gemini_schema(schema, definitions):
     """Pydantic's JSON Schema in the plain form Gemini accepts: nested models written in place, an optional field
-    (anyOf with null) as just its type, and no titles or defaults."""
+    (anyOf with null) as just its type, no titles or defaults, and the type names in capitals (STRING, OBJECT),
+    as Gemini's Schema type documents them."""
     if isinstance(schema, list):
         return [_gemini_schema(item, definitions) for item in schema]
     if not isinstance(schema, dict):
@@ -82,7 +83,10 @@ def _gemini_schema(schema, definitions):
         if len(kept) == 1:
             merged = {**kept[0], **{k: v for k, v in schema.items() if k == "description"}}
             return _gemini_schema(merged, definitions)
-    return {k: _gemini_schema(v, definitions) for k, v in schema.items() if k not in ("title", "$defs", "default")}
+    cleaned = {k: _gemini_schema(v, definitions) for k, v in schema.items() if k not in ("title", "$defs", "default")}
+    if isinstance(cleaned.get("type"), str):
+        cleaned["type"] = cleaned["type"].upper()
+    return cleaned
 
 
 def build_definitions():

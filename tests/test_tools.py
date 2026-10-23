@@ -65,10 +65,14 @@ def test_definitions_are_in_the_plain_form_gemini_accepts():
     services = next(d for d in definitions if d["name"] == "get_services")
     assert "parameters" not in services  # no input: no parameters at all
     create = next(d for d in definitions if d["name"] == "create_booking")
-    assert create["parameters"]["properties"]["customer_details"]["properties"]["phone"]["type"] == "string"
+    assert create["parameters"]["type"] == "OBJECT"  # Gemini's documented type names are in capitals
+    assert create["parameters"]["properties"]["customer_details"]["properties"]["phone"]["type"] == "STRING"
     assert set(create["parameters"]["required"]) == {"customer_details", "service_id", "start_time", "end_time"}
     slots = next(d for d in definitions if d["name"] == "find_available_slots")["parameters"]
-    assert slots["properties"]["time_preference"]["type"] == "string"  # an optional field is just its type
+    assert slots["properties"]["time_preference"]["type"] == "STRING"  # an optional field is just its type
+    availability = next(d for d in definitions if d["name"] == "check_calendar_availability")["parameters"]
+    assert availability["properties"]["duration"] == {"type": "INTEGER", "minimum": 5, "maximum": 480,
+                                                      "description": "Appointment length in minutes."}
     assert "time_preference" not in slots["required"] and slots["properties"]["time_preference"]["description"]
 
 

@@ -1,23 +1,24 @@
 """One browser connection = one VoiceSession.
 
-The session is the conductor. It listens to the microphone audio from the browser, forwards
-it to Deepgram, reacts to Deepgram's turn events, starts and cancels Turns (model + tools + TTS), and
-keeps the browser informed with small JSON events. It also owns the short-term memory of the call.
+The session connects the browser to Gemini Live. Gemini hears the caller, decides when they have finished,
+thinks and speaks. The session passes the audio both ways and keeps everything that must stay in code: the
+booking tools and their confirmation gate, the guardrails, the short-term memory and the latency log.
 
 Messages from the browser:
-  binary                      microphone audio (16-bit PCM, mono)
+  binary                      microphone audio (16-bit PCM, mono, 16 kHz)
   {"type": "start"}           begin the conversation
   {"type": "stop"}            end the conversation
-  {"type": "playback_started"}   the speakers just began playing the reply
-  {"type": "playback_progress", "played_ms": N}   how much of the reply has been played
+  {"type": "playback_started"}   the speakers just began playing the answer
+  {"type": "playback_progress", "played_ms": N}   how much of the answer has been played
   {"type": "playback_drained"}   the speakers finished playing everything
 
 Messages to the browser:
-  binary                      the reply audio (16-bit PCM, mono)
-  JSON events: config, ready, state, user_speaking, transcript_interim, transcript_final,
-               assistant_text, tool, audio_end, clear, interrupted, metrics, warning, error, idle_timeout
+  binary                      the answer audio (16-bit PCM, mono, 24 kHz)
+  JSON events: config, ready, state, turn, user_text, reply, assistant_text, tool, audio_end, clear,
+               interrupted, metrics, warning, calendar_ok, error, idle_timeout
 """
 import asyncio
+import base64
 import json
 import logging
 import math
@@ -26,68 +27,87 @@ import time
 from array import array
 
 from .booking.calendar_client import CalendarError
+from .booking.speech import tidy_numbers
+from .live import GeminiLive
 from .memory import SessionMemory
-from .stt import DeepgramFluxStream
+from .prompt import build_instructions
 from .timing import TurnTimer
-from .tools import ToolRunner
-from .tts import ElevenLabsSession
-from .turn import Turn
+from .tools import ToolContext, ToolRunner, build_definitions, for_model
 
 log = logging.getLogger("session")
 
-BLOCKED_NOTE = "[message removed by the safety filter]"
+# What Gemini is told when the output guardrail stopped an answer.
+NOTE = "[System note] {why} Do not go on with what you were saying. Say exactly this sentence and nothing else: {sentence}"
+# An answer that starts this long after the caller's last loud sound is not an answer to their speech (for the latency log).
+SPEECH_IS_RECENT_SECONDS = 10
 
 
-def _same_text(a, b):
-    """Compare two transcripts ignoring capitals, punctuation and spacing."""
-    return re.sub(r"\W+", " ", a.lower()).strip() == re.sub(r"\W+", " ", b.lower()).strip()
+def _content_words(text):
+    """Words of three letters or more. Digits are left out: transcripts write spoken digits in different ways."""
+    return set(re.findall(r"[a-z']{3,}", text.lower().replace("’", "'")))
+
+
+class Reply:
+    """One answer from Gemini: from its first sound, text or tool call until turnComplete or an interruption."""
+
+    def __init__(self, number, timer, after_speech):
+        self.number = number
+        self.timer = timer
+        self.after_speech = after_speech  # it answers something the caller just said (so its latency means something)
+        self.audio_bytes = 0
+        self.text = ""  # what Gemini said, from its own transcript
+        self.finished = False  # turnComplete: all of its audio has arrived
+        self.asks_to_confirm = False  # the confirmation question is read out in this answer
+        self.blocked = False  # the output guardrail stopped it: the rest of its audio is dropped
+        self.replacement = None  # what Gemini is asked to say instead, once this answer has ended
+        self.warned_reference = False
+        self.tool_rounds = 0
+        self.reported = False  # its latency was reported
+        self.usage = None
+
+    def audio_ms(self, rate):
+        return self.audio_bytes / (rate * 2) * 1000  # 16-bit mono: 2 bytes per sample
 
 
 class VoiceSession:
-    def __init__(self, websocket, settings, llm, service, input_rail, output_rail, instructions):
+    def __init__(self, websocket, settings, service, input_rail, output_rail):
         self.ws = websocket
         self.settings = settings
-        self.llm = llm
         self.service = service
         self.input_rail = input_rail
         self.output_rail = output_rail
-        self.instructions = instructions
-        self.tts = ElevenLabsSession(settings)
-        self.stt = None
+        self.definitions = build_definitions()
+        self.live = None  # the Gemini connection; a new one for every conversation
 
         self.memory = SessionMemory(settings)  # replaced by a fresh one every time a conversation starts
         self.runner = ToolRunner(settings, service, self.memory)
-        self.turn = None  # the reply the user is waiting for or hearing
-        self.draft = None  # a reply started early, waiting for EndOfTurn
+        self.reply = None  # the answer being generated or still being played
+        self.replies = 0
         self.state = "idle"  # idle, connecting, listening, thinking, speaking
-        self.awaiting_drain = False  # all audio generated, speakers still playing it
+        self.awaiting_drain = False  # all audio of the answer arrived, the speakers are still playing it
         self.played_ms = 0
         self.last_activity = time.monotonic()
+        self.tokens_used = 0
         self.closed = False
 
-        self._ignore_user_turn = False  # barge-in off: ignore speech that started while the bot talked
-        self._quick_end = False  # True while Deepgram uses the quicker settings for a yes/no answer
-        self._eot_threshold_now = settings.deepgram_eot_threshold  # what Deepgram last confirmed
-        self._backchannel = False  # the caller said only "yeah"/"okay" while the assistant talked: not interrupting (yet)
+        self._caller_open = False  # a caller turn is open: their words go into it
+        self._caller_text = ""
+        self._caller_shown = ""  # the same with card numbers removed (for the page and the log)
+        self._caller_blocked = False  # the input guardrail blocked this turn: no tool runs for it
+        self._next_reply_asks = False  # the confirmation question will be read out in the next answer
+        self._last_loud = None  # when the microphone last carried speech (perf_counter)
+        self._levels = ([], [])  # microphone loudness of the loud and the quiet pieces in this turn
+        self._tool_tasks = {}  # Gemini's call id -> running tool
         self._send_lock = asyncio.Lock()  # one message at a time to the browser
         self._lock = asyncio.Lock()  # one state change at a time
+        self._connect_lock = asyncio.Lock()
         self._drain_task = None
         self._idle_task = None
         self._calendar_task = None
-        self._background = set()  # keeps references to small background tasks
-
-        self._connect_lock = asyncio.Lock()  # connecting happens one at a time (the page opens it, Start re-checks it)
+        self._background = set()
         self._calendar_problem = None  # the calendar's last problem, kept across conversations
         self._calendar_warning = None  # the text shown in the browser for it
         self._warmed_at = None  # when the calendar window was last refreshed
-        self._primed = False  # the model's prompt is primed once per page
-        self._voice_checked = False  # the voice is tested once per page
-        self._voice_warning = None  # set when the voice returned no sound
-        self._ack_sounds = []  # [(phrase, sound)] of the "I heard you" phrases, made when the page opened
-        self._ack_count = 0
-        self._speech_ms = 0.0  # microphone: loud time in the current stretch of speech
-        self._quiet_ms = 0.0  # microphone: quiet time since the last loud piece
-        self._levels = ([], [])  # microphone loudness of the loud and the quiet pieces since the last turn
 
     # ================================================================ sending to the browser
     async def send_event(self, event):
@@ -109,19 +129,20 @@ class VoiceSession:
             log.debug("could not send audio to the browser: %s", type(exc).__name__)
 
     async def _set_state(self, value):
-        self.state = value
-        await self.send_event({"type": "state", "value": value})
+        if self.state != value:
+            self.state = value
+            await self.send_event({"type": "state", "value": value})
 
     # ================================================================ main loop (browser -> server)
     async def run(self):
         await self.send_event({
             "type": "config",
-            "mic_sample_rate": self.settings.deepgram_sample_rate,
+            "mic_sample_rate": self.settings.gemini_input_sample_rate,
             "mic_chunk_ms": self.settings.mic_chunk_ms,
-            "tts_sample_rate": self.settings.tts_sample_rate,
+            "output_sample_rate": self.settings.gemini_output_sample_rate,
             "barge_in_enabled": self.settings.barge_in_enabled,
         })
-        # While the page just sits open, get everything ready so that Start is instant.
+        # While the page just sits open, connect to Gemini and load the calendar, so that Start is instant.
         self._spawn(self._prewarm())
         self._calendar_task = asyncio.create_task(self._calendar_watch())
         try:
@@ -130,7 +151,7 @@ class VoiceSession:
                 if message["type"] == "websocket.disconnect":
                     break
                 if message.get("bytes") is not None:
-                    await self._on_mic_audio(message["bytes"])
+                    self._on_mic_audio(message["bytes"])
                 elif message.get("text") is not None:
                     try:
                         control = json.loads(message["text"])
@@ -143,180 +164,136 @@ class VoiceSession:
         finally:
             await self.shutdown()
 
-    async def _on_mic_audio(self, data):
-        if self.stt is not None and self.state != "idle":
-            await self.stt.send_audio(data)
-            self._listen_for_a_pause(data)
-
-    def _listen_for_a_pause(self, data):
-        """A simple loudness check on the microphone, in real time (Deepgram's answer can come late). When the caller
-        has spoken and then been quiet for LISTEN_ACK_SILENCE_MS while Deepgram has still not finished the turn, a short
-        "Okay." is played so the caller knows they were heard and does not repeat themselves."""
-        s = self.settings
-        if self.turn is not None or len(data) < 2:
-            self._speech_ms = self._quiet_ms = 0.0  # the assistant is already answering: nothing to acknowledge
+    def _on_mic_audio(self, data):
+        live = self.live
+        if live is None or self.state in ("idle", "connecting") or not live.is_open():
             return
-        samples = array("h", data[:len(data) // 2 * 2])  # 16-bit PCM from the browser
+        live.send_audio(data)
+        self._measure(data)
+
+    def _measure(self, data):
+        """A loudness check on each microphone piece. Gemini does not say when it decided the caller had finished,
+        so the end of the caller's speech is estimated here, for the latency log."""
+        if len(data) < 2:
+            return
+        samples = array("h", data[:len(data) // 2 * 2])
         level = math.sqrt(sum(x * x for x in samples) / len(samples))
-        loud = level >= s.local_speech_rms
-        self._levels[0 if loud else 1].append(level)  # shown in the log when the turn is committed
-        piece_ms = len(samples) / s.deepgram_sample_rate * 1000
+        loud = level >= self.settings.local_speech_rms
         if loud:
-            self._speech_ms += piece_ms
-            self._quiet_ms = 0.0
-            return
-        self._quiet_ms += piece_ms
-        if self._quiet_ms < s.listen_ack_silence_ms:
-            return
-        spoke_for, self._speech_ms = self._speech_ms, 0.0  # a pause this long ends the stretch of speech either way
-        if (spoke_for >= s.listen_ack_min_speech_ms and self._ack_sounds and self.state == "listening"
-                and self.memory.turn_no > 0 and not self._ignore_user_turn):
-            self._spawn(self._say_ack())
-
-    async def _say_ack(self):
-        if self.turn is not None:
-            return  # the answer has started meanwhile
-        phrase, sound = self._ack_sounds[self._ack_count % len(self._ack_sounds)]
-        self._ack_count += 1
-        log.info("said %r: you went quiet and Deepgram has not finished the turn yet (it is %s ms behind)", phrase,
-                 self.stt.behind_ms if self.stt else "?")
-        await self.send_audio(sound)
-        await self.send_event({"type": "audio_end"})  # the player plays it, finishes, and starts fresh for the answer
+            self._last_loud = time.perf_counter()
+        levels = self._levels[0 if loud else 1]
+        if len(levels) < 2000:
+            levels.append(level)
 
     async def _on_control(self, message):
         kind = message.get("type")
         if kind == "start":
-            await self._start_pipeline()
+            await self._start_conversation()
         elif kind == "stop":
-            await self._stop_pipeline()
+            await self._stop_conversation()
         elif kind == "playback_started":
             await self._on_playback_started()
         elif kind == "playback_progress":
             self.played_ms = int(message.get("played_ms", 0))
         elif kind == "playback_drained":
-            await self._on_playback_drained()
+            async with self._lock:
+                if self.reply is not None and self.awaiting_drain:
+                    await self._finish_playback_nolock()
         else:
             log.debug("unknown message from the browser: %s", kind)
 
     # ================================================================ start / stop
-    async def _start_pipeline(self):
+    async def _start_conversation(self):
         if self.state != "idle":
             return
         await self._set_state("connecting")
 
-        # every conversation starts with an empty short-term memory
-        self.memory = SessionMemory(self.settings)
-        self.memory.calendar_problem = self._calendar_problem
-        self.runner = ToolRunner(self.settings, self.service, self.memory)
-
-        # Deepgram, ElevenLabs and the calendar were normally opened while the page was loading;
-        # anything that is not open (for example Deepgram closed an idle connection) is opened now, all at once.
+        # Gemini and the calendar were normally opened while the page was loading; anything that is not open is opened now
         results = await self._connect_all()
-        failures = [r for r in results[:2] if isinstance(r, Exception)]
-        if failures:
-            log.error("could not start: %s", failures)
-            await self.send_event({
-                "type": "error",
-                "message": "Could not connect: " + "; ".join(f"{type(f).__name__}: {f}" for f in failures),
-            })
-            await self._stop_pipeline(rewarm=False)
+        if isinstance(results[0], Exception):
+            log.error("could not start: %s", results[0])
+            await self.send_event({"type": "error", "message": f"Could not connect to Gemini: {results[0]}"})
+            await self._stop_conversation(rewarm=False)
             return
 
         # a calendar problem does not stop the call: the assistant tells the caller honestly instead
         if self._calendar_warning:
             await self.send_event({"type": "warning", "message": self._calendar_warning})
-        if self._voice_warning:
-            await self.send_event({"type": "warning", "message": self._voice_warning})
 
+        # every conversation starts with an empty short-term memory (and its own Gemini session)
+        self.memory = SessionMemory(self.settings)
+        self.runner = ToolRunner(self.settings, self.service, self.memory)
+        self.reply = None
+        self.replies = 0
+        self.tokens_used = 0
+        self._caller_open = False
+        self._next_reply_asks = False
+        self._last_loud = None
+        self._levels = ([], [])
         self.last_activity = time.monotonic()
-        self.stt.bytes_sent = 0
         await self._set_state("listening")
         await self.send_event({"type": "ready"})
         self._idle_task = asyncio.create_task(self._idle_watchdog())
         log.info("session ready")
 
-    # ================================================================ getting ready before Start
     async def _prewarm(self):
-        """Runs when the page opens and again after every Stop: connect the ears, the voice and the calendar and
-        prime the model's prompt, so that pressing Start has nothing left to wait for."""
+        """Runs when the page opens and again after every Stop, so that pressing Start has nothing left to wait for."""
         started = time.perf_counter()
-        try:
-            await self._connect_all()
-            log.info("ready for Start (connections opened in %.0f ms)", (time.perf_counter() - started) * 1000)
-        except Exception:
-            log.exception("could not prepare the connections; they will be opened at Start")
+        results = await self._connect_all()
+        if isinstance(results[0], Exception):
+            log.warning("could not prepare Gemini (it will be tried again at Start): %s", results[0])
+            await self.send_event({"type": "warning", "message": f"Gemini is not reachable: {results[0]}"})
             return
-        if self.settings.tts_check_on_connect and not self._voice_checked:
-            self._voice_checked = True
-            await self._check_voice()
-        if self.settings.openai_prime_on_connect and not self._primed:
-            self._primed = True
-            await self.llm.prime(self.instructions, self.runner.definitions)
-
-    async def _check_voice(self):
-        """Make the sound of the short "I heard you" phrases once and keep it, so they play instantly later. This also
-        finds an empty ElevenLabs account before anybody talks to the assistant."""
-        phrases = self.settings.listen_ack_phrases or ["Hi."]
-        try:
-            sounds = [(phrase, await self.tts.synthesize(phrase)) for phrase in phrases]
-        except Exception as exc:
-            log.warning("could not test the voice: %s: %s", type(exc).__name__, exc)
-            return
-        produced = sum(len(sound) for _, sound in sounds)
-        if self.settings.listen_ack_phrases:
-            self._ack_sounds = [(phrase, sound) for phrase, sound in sounds if sound]
-        if produced == 0:
-            log.error("VOICE PROBLEM: the voice returned no sound at all; the account may be out of credits")
-            self._voice_warning = self.settings.no_audio_warning
-            await self.send_event({"type": "warning", "message": self._voice_warning})
-        else:
-            log.info("voice check passed (%.1f s of sound)", produced / (self.settings.tts_sample_rate * 2))
+        log.info("ready for Start (connections opened in %.0f ms)", (time.perf_counter() - started) * 1000)
 
     async def _connect_all(self):
-        """Open whatever is not open yet; anything already open is kept. Returns [ears, voice, calendar] results."""
+        """Open whatever is not open yet; anything already open is kept. Returns [gemini, calendar] results."""
         async with self._connect_lock:
-            jobs = []
-            if self.stt is None or not self.stt.is_open():
-                if self.stt is not None:
-                    await self.stt.close()
-                self.stt = DeepgramFluxStream(self.settings, self._on_stt_event, self._on_stt_closed)
-                self._quick_end = False  # a new connection starts with the normal settings
-                self._eot_threshold_now = self.settings.deepgram_eot_threshold
-                jobs.append(self.stt.connect())
-            else:
-                jobs.append(self._nothing())
-            jobs.append(self.tts.connect())
+            live_ready = self.live is not None and self.live.is_open()
             window_is_old = (
                 self._warmed_at is None
                 or self._calendar_problem is not None
                 or time.monotonic() - self._warmed_at > self.settings.calendar_cache_seconds
             )
-            jobs.append(self._warm_calendar() if window_is_old else self._nothing())
-            return await asyncio.gather(*jobs, return_exceptions=True)
+            return await asyncio.gather(
+                self._nothing() if live_ready else self._open_live(),
+                self._warm_calendar() if window_is_old else self._nothing(),
+                return_exceptions=True,
+            )
 
     @staticmethod
     async def _nothing():
         return None
 
-    async def _stop_pipeline(self, error_message=None, rewarm=True):
+    async def _open_live(self):
+        """A new Gemini session with fresh instructions (they carry the current date and time)."""
+        if self.live is not None:
+            await self.live.close()
+        live = GeminiLive(self.settings, self._on_live_message, None)
+        live.on_closed = lambda reason: self._on_live_closed(live, reason)
+        self.live = live
+        await live.connect(build_instructions(self.settings, self.service.now()), self.definitions)
+
+    async def _stop_conversation(self, error_message=None, rewarm=True):
         async with self._lock:
             if self._idle_task is not None:
                 self._idle_task.cancel()
                 self._idle_task = None
-            await self._cancel_draft_nolock()
-            if self.turn is not None:
-                turn, self.turn = self.turn, None
-                await turn.cancel()
+            for task in list(self._tool_tasks.values()):
+                task.cancel()  # a change that has started still finishes (the tool runner protects it)
             self._cancel_drain_watchdog()
             self.awaiting_drain = False
-            self._ignore_user_turn = False
-            self._backchannel = False
-            if self.stt is not None:
-                await self.stt.close()
-                self.stt = None
+            self.reply = None
+            self._caller_open = False
+            live, self.live = self.live, None
+            if live is not None:
+                await live.close()  # the next conversation gets a new Gemini session: it never sees this one
             await self.send_event({"type": "clear"})
             if error_message:
                 await self.send_event({"type": "error", "message": error_message})
+            if self.tokens_used:
+                log.info("this call used %d tokens (as reported by Gemini)", self.tokens_used)
+                self.tokens_used = 0
             await self._set_state("idle")
         if rewarm and not self.closed:
             self._spawn(self._prewarm())  # so the next Start is instant too
@@ -327,20 +304,28 @@ class VoiceSession:
         if self._calendar_task is not None:
             self._calendar_task.cancel()
             self._calendar_task = None
-        await self._stop_pipeline(rewarm=False)
+        await self._stop_conversation(rewarm=False)
         self.closed = True
-        await self.tts.close()
         log.info("session closed")
 
+    async def _on_live_closed(self, live, reason):
+        if live is not self.live or self.closed:
+            return  # an old connection
+        if self.state == "idle":
+            log.info("the waiting Gemini connection closed (%s); a new one opens at Start", reason)
+            return
+        # run in a separate task: stopping closes the reader that is calling us
+        self._spawn(self._stop_conversation(error_message=f"Gemini stopped the call: {reason}"))
+
     async def _idle_watchdog(self):
-        """Stop listening if nobody has spoken for a while (saves Deepgram credits)."""
+        """Stop the call if nobody has spoken for a while."""
         while True:
             await asyncio.sleep(5)
             idle_for = time.monotonic() - self.last_activity
             if self.state == "listening" and idle_for > self.settings.idle_timeout_seconds:
                 log.info("no activity for %.0f s, stopping", idle_for)
                 await self.send_event({"type": "idle_timeout"})
-                self._spawn(self._stop_pipeline())
+                self._spawn(self._stop_conversation())
                 return
 
     async def _calendar_watch(self):
@@ -364,7 +349,6 @@ class VoiceSession:
             if self._calendar_problem is not None:
                 log.info("the calendar is reachable again")
                 self._calendar_problem = self._calendar_warning = None
-                self.memory.calendar_problem = None
                 await self.send_event({"type": "calendar_ok"})
 
     async def _set_calendar_problem(self, message, hint=""):
@@ -373,264 +357,242 @@ class VoiceSession:
             log.warning("calendar problem: %s", message)
             self._calendar_problem = message
             self._calendar_warning = f"Calendar problem: {message} {hint}".strip()
-            self.memory.calendar_problem = message
             await self.send_event({"type": "warning", "message": self._calendar_warning})
-
-    async def _on_stt_closed(self, reason):
-        if self.closed or self.state == "idle":
-            return
-        # run in a separate task: stop_pipeline closes the STT reader that is calling us
-        self._spawn(self._stop_pipeline(error_message=f"Speech recognition stopped: {reason}"))
 
     def _spawn(self, coroutine):
         task = asyncio.create_task(coroutine)
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
-    # ================================================================ Deepgram events
-    async def _on_stt_event(self, event):
+    # ================================================================ Gemini -> session
+    async def _on_live_message(self, message):
         started = time.perf_counter()
-        kind = event.get("type")
-        if kind == "TurnInfo" and event.get("event") == "Update":
-            await self._show_live_text(event)  # never waits for the lock: your words appear at once
-            words = (event.get("transcript") or "").strip()
-            if self._backchannel and words and not self._is_backchannel(words):
-                async with self._lock:  # the "yeah" turned into a real request: interrupt after all
-                    if self._backchannel and self.turn is not None:
-                        self._backchannel = False
-                        await self._interrupt_nolock()
-        elif kind == "TurnInfo":
-            async with self._lock:
-                await self._handle_turn_info(event)
-        elif kind == "Connected":
-            log.info("Deepgram connected")
-        elif kind == "ConfigureSuccess":
-            log.info("Deepgram turn settings now: %s", event.get("thresholds"))
-            self._eot_threshold_now = (event.get("thresholds") or {}).get("eot_threshold", self._eot_threshold_now)
-        elif kind == "ConfigureFailure":
-            log.warning("Deepgram refused the new turn settings, the old ones stay: %s", event)
-        elif kind and "error" in kind.lower():
-            log.error("Deepgram error: %s", event)
-            await self.send_event({"type": "error", "message": f"Deepgram: {event}"})
-        else:
-            log.debug("Deepgram message: %s", kind)
+        async with self._lock:
+            if self.state in ("idle", "connecting"):
+                return  # a late message for a call that has ended
+            content = message.get("serverContent") or {}
+            heard = (content.get("inputTranscription") or {}).get("text")
+            if heard:
+                await self._on_caller_words(heard)
+            if content.get("interrupted"):
+                await self._on_interrupted()
+            for part in (content.get("modelTurn") or {}).get("parts") or []:
+                data = (part.get("inlineData") or {}).get("data")
+                if data:
+                    await self._on_answer_audio(base64.b64decode(data))
+            said = (content.get("outputTranscription") or {}).get("text")
+            if said:
+                await self._on_answer_text(said)
+            if "toolCall" in message:
+                await self._on_tool_call(message["toolCall"])
+            if "toolCallCancellation" in message:
+                self._on_tool_cancellation(message["toolCallCancellation"])
+            if "usageMetadata" in message:
+                self._on_usage(message["usageMetadata"])
+            if content.get("generationComplete") and self.reply is not None:
+                self.reply.timer.mark("generation_complete")
+            if content.get("turnComplete"):
+                await self._on_turn_complete()
         elapsed_ms = (time.perf_counter() - started) * 1000
         if elapsed_ms > self.settings.slow_event_warning_ms:
-            log.warning("slow Deepgram event %s/%s: %.0f ms to handle (waiting for the lock or for the browser)",
-                        kind, event.get("event"), elapsed_ms)
+            log.warning("slow Gemini message %s: %.0f ms to handle (waiting for the lock or for the browser)",
+                        sorted(message), elapsed_ms)
 
-    async def _show_live_text(self, event):
-        transcript = (event.get("transcript") or "").strip()
-        if transcript and not self._ignore_user_turn:
-            await self.send_event({"type": "transcript_interim", "text": transcript})
+    # ---------------------------------------------------------------- the caller
+    async def _open_caller_turn(self):
+        self._caller_open = True
+        self._caller_text = self._caller_shown = ""
+        self._caller_blocked = False
+        self.memory.turn_no += 1
+        await self.send_event({"type": "turn", "number": self.memory.turn_no})
 
-    async def _handle_turn_info(self, event):
-        name = event.get("event")
-        transcript = (event.get("transcript") or "").strip()
-        if transcript and name in ("EagerEndOfTurn", "EndOfTurn") and not re.search(r"[^\W_]", transcript):
-            log.info("ignored %s with no words in it: %r", name, transcript)  # for example "." from a noise
-            transcript = ""
-
-        if name == "StartOfTurn":
-            self.last_activity = time.monotonic()
-            await self.send_event({"type": "user_speaking"})
-            if self.turn is not None:
-                if not self.settings.barge_in_enabled:
-                    log.info("barge-in is off: ignoring speech while the assistant talks")
-                    self._ignore_user_turn = True
-                elif self._is_backchannel(transcript) and not self._asks_to_confirm(self.turn):
-                    # "yeah", "okay", "go ahead" while the assistant talks is agreement, not a new request
-                    log.info("%r while the assistant talks: not interrupting for that", transcript)
-                    self._backchannel = True
-                else:
-                    await self._interrupt_nolock()
-            elif self.draft is not None:
-                await self._cancel_draft_nolock()
-
-        elif name == "EagerEndOfTurn":
-            can_draft = self.settings.deepgram_eager_eot_threshold is not None
-            if can_draft and transcript and self.turn is None and self.draft is None and not self._ignore_user_turn:
-                verdict = self.input_rail.check(transcript)
-                if verdict.action != "block":  # a message that will be blocked never reaches the model, not even as a draft
-                    timer = TurnTimer()
-                    timer.mark("draft_started")
-                    self.draft = self._new_turn(verdict.text, timer)
-                    log.info("early draft started for %r", verdict.text)
-
-        elif name == "TurnResumed":
-            if self.draft is not None:
-                log.info("user kept talking: draft discarded")
-                await self._cancel_draft_nolock()
-
-        elif name == "EndOfTurn":
-            await self._on_end_of_turn(event, transcript)
-
-    # ================================================================ turns
-    def _new_turn(self, user_text, timer, scripted_reply=None):
-        turn = Turn(
-            user_text=user_text,
-            history=list(self.memory.messages),
-            settings=self.settings,
-            llm=self.llm,
-            tts=self.tts,
-            timer=timer,
-            send_event=self.send_event,
-            send_audio=self.send_audio,
-            on_speaking=self._on_speaking,
-            memory=self.memory,
-            runner=self.runner,
-            rail=self.output_rail,
-            instructions=self.instructions,
-            scripted_reply=scripted_reply,
-        )
-        turn.start().add_done_callback(lambda task, t=turn: self._spawn(self._on_turn_done(t, task)))
-        return turn
-
-    def _discard(self, turn):
-        """Stop a turn without making anybody wait for its clean-up. Closing the model's HTTP stream can take a
-        while, and everything Deepgram tells us waits behind the same lock."""
-        turn.stop()
-        self._spawn(turn.cancel())
-
-    async def _cancel_draft_nolock(self):
-        if self.draft is not None:
-            draft, self.draft = self.draft, None
-            self._discard(draft)
-
-    async def _on_end_of_turn(self, event, transcript):
-        self.last_activity = time.monotonic()
-
-        if self._ignore_user_turn:
-            self._ignore_user_turn = False
-            log.info("ignored a user turn that started while the assistant was talking")
+    def _close_caller_turn(self):
+        if not self._caller_open:
             return
-        if self._backchannel:
-            self._backchannel = False
-            if self.turn is not None and self._is_backchannel(transcript):
-                log.info("ignored %r: said while the assistant was still talking", transcript)
-                await self._cancel_draft_nolock()
-                return
-            # the assistant has finished meanwhile (or it became a real request): handle it like any other turn
-        if not transcript:
-            await self._cancel_draft_nolock()
-            return
-        if self.turn is not None:  # should not happen, but never run two replies at once
-            await self._interrupt_nolock()
-
-        verdict = self.input_rail.check(transcript)  # the input guardrail
-        shown_text = verdict.text or transcript
-
-        if verdict.action == "block":
-            await self._cancel_draft_nolock()
-            # the model never sees this message; the code answers with a fixed sentence
-            turn = self._new_turn(BLOCKED_NOTE, TurnTimer(), scripted_reply=verdict.reply)
-        elif self.draft is not None and _same_text(self.draft.user_text, verdict.text):
-            turn, self.draft = self.draft, None
-            turn.draft_hit = True
-        else:
-            await self._cancel_draft_nolock()
-            turn = self._new_turn(verdict.text, TurnTimer())
-
-        turn.eot_lag_ms = self._eot_lag_ms(event)
-        self.turn = turn
-        self.played_ms = 0
-        self.awaiting_drain = False
-        self.memory.turn_no += 1  # only turns that are really committed get a number
-        turn.commit(self.memory.turn_no)  # opens the gate: the reply may now be spoken
-        log.info("turn %d committed (draft_hit=%s, input=%s, eot_lag_ms=%s, deepgram_behind_ms=%s, deepgram_sure=%s): %r",
-                 turn.turn_id, turn.draft_hit, verdict.action, turn.eot_lag_ms, self.stt.behind_ms if self.stt else None,
-                 self._how_sure(event), shown_text)
+        self._caller_open = False
         loud, quiet = self._levels
-        if loud or quiet:
-            log.info("turn %d microphone: speech level %s, background %s (speech counts from LOCAL_SPEECH_RMS=%.0f)",
-                     turn.turn_id, f"{max(loud):.0f}" if loud else "none", f"{sorted(quiet)[len(quiet) // 2]:.0f}" if quiet else "none",
-                     self.settings.local_speech_rms)
+        log.info("turn %d: the caller said %r (microphone: speech level %s, background %s, speech counts from %.0f)",
+                 self.memory.turn_no, tidy_numbers(self._caller_shown.strip()),
+                 f"{max(loud):.0f}" if loud else "none", f"{sorted(quiet)[len(quiet) // 2]:.0f}" if quiet else "none",
+                 self.settings.local_speech_rms)
         self._levels = ([], [])
-        await self._tune_end_of_turn()  # the answer is in: back to the normal settings
 
-        await self.send_event({"type": "transcript_final", "text": shown_text})
-        await self._set_state("thinking")
+    async def _on_caller_words(self, text):
+        """A piece of Gemini's transcript of the caller."""
+        self.last_activity = time.monotonic()
+        if not self._caller_open:
+            await self._open_caller_turn()
+        reply = self.reply
+        if (reply is not None and reply.finished and self.awaiting_drain and self.settings.barge_in_enabled
+                and re.search(r"[^\W_]", text)):
+            # Gemini has finished this answer, so it does not interrupt it: the rest is only in our speakers
+            await self._stop_playback_nolock(reply, "the caller spoke while the end of the answer was still playing")
+        self.memory.hear(text)
+        self._caller_text += text
+        verdict = self.input_rail.check(self._caller_text)
+        if verdict.action == "block" and not self._caller_blocked:
+            self._caller_blocked = True
+            log.warning("turn %d: the input guardrail blocked this turn (%s), so no tool will run for it",
+                        self.memory.turn_no, verdict.reason)
+        self._caller_shown = verdict.text if verdict.action == "redact" else self._caller_text
+        await self.send_event({"type": "user_text", "text": tidy_numbers(self._caller_shown.strip())})
 
-    def _is_backchannel(self, text):
-        """Only agreeing noises: "Yeah.", "Okay, sure.", "Mm-hm", "Yes, go ahead", "Thank you"."""
-        words = re.findall(r"[a-z']+", text.lower().replace("’", "'"))
-        allowed = self.settings.backchannel_words
-        return 0 < len(words) <= self.settings.backchannel_max_words and all(word in allowed for word in words)
+    # ---------------------------------------------------------------- Gemini's answer
+    async def _answer(self):
+        """The answer that is being generated now, started when its first sound, text or tool call arrives."""
+        reply = self.reply
+        if reply is not None and not reply.finished:
+            return reply
+        if reply is not None:
+            # the previous answer has all arrived but is still playing; the new one plays after it
+            self._end_reply_nolock(reply, heard=False)
+        spoke = self._last_loud
+        after_speech = spoke is not None and time.perf_counter() - spoke < SPEECH_IS_RECENT_SECONDS
+        timer = TurnTimer()
+        timer.mark("speech_end", at=spoke if after_speech else None)
+        timer.mark("answer_started")
+        self.replies += 1
+        reply = Reply(self.replies, timer, after_speech)
+        reply.asks_to_confirm, self._next_reply_asks = self._next_reply_asks, False
+        self.reply = reply
+        if not self._caller_open:
+            await self._open_caller_turn()
+        await self.send_event({"type": "reply"})
+        return reply
 
-    def _asks_to_confirm(self, turn):
-        """Is this reply the confirmation question? Then a "yes" spoken over it is the real answer."""
-        pending = self.memory.pending
-        return pending is not None and pending.turn_no == turn.turn_id
-
-    def _how_sure(self, event):
-        """Deepgram's confidence that the caller had finished. Below the threshold means it gave up waiting instead."""
-        sure = event.get("end_of_turn_confidence")
-        if not isinstance(sure, (int, float)):
-            return "unknown"
-        if sure < self._eot_threshold_now:  # the value Deepgram itself confirmed (a change can arrive late)
-            return f"{sure:.2f}, below the threshold: probably the silence timeout"
-        return f"{sure:.2f}"
-
-    async def _tune_end_of_turn(self):
-        """Right after the confirmation question the caller usually just says "yes" or "no". Deepgram is often unsure
-        that such a short answer is finished and waits for its silence timeout, so for that one answer it is told to
-        decide sooner. Called whenever a reply ends or an answer is committed; it only sends something on a change."""
-        s = self.settings
-        if s.deepgram_confirm_eot_threshold is None or self.stt is None:
-            return
-        pending = self.memory.pending
-        wanted = pending is not None and pending.turn_no == self.memory.turn_no  # the last reply asked the question
-        if wanted == self._quick_end:
-            return
-        self._quick_end = wanted
-        if wanted:
-            await self.stt.configure(s.deepgram_confirm_eot_threshold, s.deepgram_confirm_eot_timeout_ms)
-        else:
-            await self.stt.configure(s.deepgram_eot_threshold, s.deepgram_eot_timeout_ms)
-
-    def _eot_lag_ms(self, event):
-        """How long after the user's last word did Deepgram tell us they were done?"""
-        if self.stt is None:
-            return None
-        words = event.get("words") or []
-        last_end = words[-1].get("end") if words else None
-        if last_end is None:
-            last_end = event.get("audio_window_end")
-        if last_end is None:
-            return None
-        return int(max(0.0, (self.stt.audio_seconds_sent - float(last_end)) * 1000))
-
-    async def _on_speaking(self, turn):
-        if turn is self.turn and self.state == "thinking":
+    async def _on_answer_audio(self, pcm):
+        reply = await self._answer()
+        if reply.blocked:
+            return  # the output guardrail stopped this answer: none of the rest may reach the speakers
+        if reply.audio_bytes == 0:
+            reply.timer.mark("first_audio")
             await self._set_state("speaking")
+        reply.audio_bytes += len(pcm)
+        self.last_activity = time.monotonic()
+        await self.send_audio(pcm)
 
-    async def _on_turn_done(self, turn, task):
-        """Called when a Turn's task ends (finished, failed or cancelled)."""
-        async with self._lock:
-            if turn is not self.turn or task.cancelled():
-                return  # a draft that was discarded, or a turn that was interrupted
-            error = task.exception()
-            if error is not None:
-                log.error("turn %d failed: %s: %s", turn.turn_id, type(error).__name__, error)
-                self.memory.add_exchange(turn.user_text, "")
-                if self.memory.pending is not None and self.memory.pending.turn_no == turn.turn_id:
-                    self.memory.pending = None  # the caller never heard this question
-                self.turn = None
-                await self.send_event({"type": "clear"})
-                await self.send_event({"type": "error", "message": str(error)})
-                await self._set_state("listening")
-                return
-            # all audio was generated; tell the browser no more is coming and wait for it to finish playing
-            await self.send_event({"type": "audio_end"})
-            self.awaiting_drain = True
-            wait = turn.audio_ms / 1000 + self.settings.drain_grace_seconds
-            self._drain_task = asyncio.create_task(self._drain_watchdog(turn, wait))
+    async def _on_answer_text(self, text):
+        """A piece of Gemini's transcript of its own answer. The output guardrail checks it. Gemini makes sound faster
+        than it is played, so this text normally arrives well before the caller hears the same words."""
+        reply = await self._answer()
+        if reply.blocked:
+            return
+        reply.text += text
+        verdict = self.output_rail.check(reply.text[-200:], "", self.memory.achieved, self.memory.known_refs)
+        if not verdict.ok and verdict.reason == "unknown_reference":
+            # a transcript of spoken digits is not exact enough to stop the voice for; it is logged instead
+            if not reply.warned_reference:
+                reply.warned_reference = True
+                log.warning("reply %d: a booking reference was said that no tool returned (from the transcript, "
+                            "which can mishear digits): %r", reply.number, reply.text[-80:])
+        elif not verdict.ok:
+            await self._block_reply_nolock(reply, verdict)
+            return
+        await self.send_event({"type": "assistant_text", "text": tidy_numbers(reply.text.strip())})
 
-    async def _drain_watchdog(self, turn, wait):
+    async def _block_reply_nolock(self, reply, verdict):
+        reply.blocked = True
+        reply.replacement = verdict.text
+        log.warning("reply %d stopped by the output guardrail (%s); %.0f of %.0f ms of its sound had been played: %r",
+                    reply.number, verdict.reason, self.played_ms, reply.audio_ms(self.settings.gemini_output_sample_rate),
+                    reply.text[-120:])
+        await self.send_event({"type": "clear"})  # silence the speakers at once
+        await self.send_event({"type": "interrupted"})
+        if reply.finished:  # all of it had arrived already: end it now and ask for the replacement
+            self._end_reply_nolock(reply, heard=False)
+            self._send_replacement(reply)
+            await self._set_state("listening")
+
+    def _send_replacement(self, reply):
+        if reply.replacement and self.live is not None:
+            log.info("asking Gemini to say instead: %r", reply.replacement)
+            self.live.send_note(NOTE.format(why="Your last answer was stopped by the safety filter.", sentence=reply.replacement))
+
+    async def _on_turn_complete(self):
+        reply = self.reply
+        self._close_caller_turn()
+        if reply is None or reply.finished:
+            return
+        reply.finished = True
+        log.info("reply %d said: %s", reply.number, tidy_numbers(reply.text.strip()) or "(nothing)")
+        if reply.usage:
+            log.info("reply %d tokens: %s", reply.number, reply.usage)
+        if reply.blocked:
+            self._end_reply_nolock(reply, heard=False)
+            self._send_replacement(reply)
+            await self._set_state("listening")
+            return
+        if reply.audio_bytes == 0:
+            # nothing was said (for example Gemini ended its turn right after a tool call): if the confirmation
+            # question belongs to this answer, Gemini reads it out in the next one
+            self._next_reply_asks = self._next_reply_asks or reply.asks_to_confirm
+            reply.asks_to_confirm = False
+            self._end_reply_nolock(reply, heard=False)
+            await self._set_state("listening")
+            return
+        # all audio has arrived; tell the browser no more is coming and wait for it to finish playing
+        await self.send_event({"type": "audio_end"})
+        self.awaiting_drain = True
+        wait = reply.audio_ms(self.settings.gemini_output_sample_rate) / 1000 + self.settings.drain_grace_seconds
+        self._drain_task = asyncio.create_task(self._drain_watchdog(reply, wait))
+
+    async def _on_interrupted(self):
+        """Gemini heard the caller start talking while it was still generating, and stopped."""
+        reply = self.reply
+        self._close_caller_turn()
+        if reply is None:
+            return
+        if reply.finished:  # all of it had arrived; only its end was still playing
+            await self._stop_playback_nolock(reply, "barge-in")
+            return
+        log.info("barge-in on reply %d (played %d of %.0f ms)", reply.number, self.played_ms,
+                 reply.audio_ms(self.settings.gemini_output_sample_rate))
+        await self.send_event({"type": "clear"})
+        await self.send_event({"type": "interrupted"})
+        self._end_reply_nolock(reply, heard=False)  # it was cut off while being generated: the question was not complete
+        self._send_replacement(reply)
+        await self._set_state("listening")
+
+    async def _stop_playback_nolock(self, reply, why):
+        """The caller talks over the end of an answer that is still playing in the browser."""
+        rate = self.settings.gemini_output_sample_rate
+        played_share = self.played_ms / max(reply.audio_ms(rate), 1.0)
+        log.info("%s: speakers stopped (reply %d, played %d of %.0f ms)", why, reply.number, self.played_ms, reply.audio_ms(rate))
+        await self.send_event({"type": "clear"})
+        await self.send_event({"type": "interrupted"})
+        self._end_reply_nolock(reply, heard=played_share >= self.settings.confirm_heard_share)
+        await self._set_state("listening")
+
+    async def _finish_playback_nolock(self):
+        self._end_reply_nolock(self.reply, heard=True)
+        await self._set_state("listening")
+
+    def _end_reply_nolock(self, reply, heard):
+        """The answer is over. If it read out the confirmation question, decide whether the caller heard it."""
+        if reply is not self.reply:
+            return
+        self.reply = None
+        self.awaiting_drain = False
+        self._cancel_drain_watchdog()
+        self.played_ms = 0
+        pending = self.memory.pending
+        if not reply.asks_to_confirm or pending is None:
+            return
+        wanted = _content_words(pending.question)
+        share = len(wanted & _content_words(reply.text)) / max(len(wanted), 1)
+        if heard and share >= self.settings.read_back_min_share:
+            self.memory.question_heard()
+            log.info("the caller has heard the confirmation question (%.0f%% of its words were read out)", share * 100)
+        else:
+            log.info("the confirmation question was %s (%.0f%% of its words were read out): it will be asked again",
+                     "heard" if heard else "cut short", share * 100)
+            self.memory.pending = None
+
+    async def _drain_watchdog(self, reply, wait):
         """Safety net in case the browser never reports that it finished playing."""
         await asyncio.sleep(wait)
         async with self._lock:
-            if turn is self.turn and self.awaiting_drain:
+            if reply is self.reply and self.awaiting_drain:
                 log.warning("the browser never reported the end of playback, finishing anyway")
                 await self._finish_playback_nolock()
 
@@ -639,56 +601,63 @@ class VoiceSession:
             self._drain_task.cancel()
             self._drain_task = None
 
+    # ---------------------------------------------------------------- tools
+    async def _on_tool_call(self, tool_call):
+        reply = await self._answer()
+        reply.tool_rounds += 1
+        reply.timer.mark("tools_started")
+        await self._set_state("thinking")
+        ctx = ToolContext(emit=self.send_event, turn_no=self.memory.turn_no, blocked=self._caller_blocked)
+        too_many = reply.tool_rounds > self.settings.max_tool_rounds
+        for call in tool_call.get("functionCalls") or []:
+            # every call answers Gemini as soon as it is finished, so one slow tool never holds up another
+            self._tool_tasks[call.get("id")] = asyncio.create_task(self._run_tool(call, ctx, reply, too_many))
+
+    async def _run_tool(self, call, ctx, reply, too_many):
+        call_id, name = call.get("id"), call.get("name", "")
+        try:
+            if too_many:
+                log.warning("Gemini kept asking for tools in one answer; telling it to answer now")
+                result = {"ok": False, "error": "TOO_MANY_TOOL_CALLS", "message": "Stop using tools now and answer the caller."}
+            else:
+                result = await self.runner.run(name, call.get("args") or {}, ctx)
+        except asyncio.CancelledError:
+            log.info("tool %s was cancelled (the caller interrupted, or the call ended)", name)
+            return
+        finally:
+            self._tool_tasks.pop(call_id, None)
+        if result.get("error") == "CONFIRMATION_REQUIRED":
+            if self.reply is not None and not self.reply.finished:
+                self.reply.asks_to_confirm = True
+            else:
+                self._next_reply_asks = True  # Gemini ended its turn before speaking; the question comes in the next answer
+        reply.timer.mark("tools_done")
+        if self.live is not None:
+            self.live.send_tool_response([{"id": call_id, "name": name, "response": for_model(result)}])
+
+    def _on_tool_cancellation(self, cancellation):
+        for call_id in cancellation.get("ids") or []:
+            task = self._tool_tasks.get(call_id)
+            if task is not None:
+                task.cancel()
+
+    def _on_usage(self, usage):
+        total = usage.get("totalTokenCount")
+        if isinstance(total, int):
+            self.tokens_used += total
+        if self.reply is not None:
+            self.reply.usage = {k: v for k, v in usage.items() if k.endswith("TokenCount")}
+
     # ================================================================ playback reports from the browser
     async def _on_playback_started(self):
-        turn = self.turn
-        if turn is None:
+        reply = self.reply
+        if reply is None or reply.reported:
             return
-        turn.timer.mark("audio_played")
-        metrics = {"type": "metrics", "draft_hit": turn.draft_hit, "eot_lag_ms": turn.eot_lag_ms}
-        metrics.update(turn.timer.summary())
-        played = metrics.get("audio_played_ms")
-        if played is not None and turn.eot_lag_ms is not None:
-            metrics["perceived_ms"] = turn.eot_lag_ms + played
-        log.info("turn %d latency: %s", turn.turn_id, {k: v for k, v in metrics.items() if k != "type"})
+        reply.reported = True
+        reply.timer.mark("audio_played")
+        metrics = {"type": "metrics", "after_speech": reply.after_speech}
+        metrics.update(reply.timer.summary())
+        if reply.after_speech:
+            metrics["perceived_ms"] = metrics.get("audio_played_ms")
+        log.info("reply %d latency: %s", reply.number, {k: v for k, v in metrics.items() if k != "type"})
         await self.send_event(metrics)
-
-    async def _on_playback_drained(self):
-        async with self._lock:
-            if self.turn is not None and self.awaiting_drain:
-                await self._finish_playback_nolock()
-
-    async def _finish_playback_nolock(self):
-        turn, self.turn = self.turn, None
-        self.awaiting_drain = False
-        self._cancel_drain_watchdog()
-        self.played_ms = 0
-        self.memory.add_exchange(turn.user_text, turn.answer)
-        await self._set_state("listening")
-        await self._tune_end_of_turn()  # quicker if that reply was the confirmation question
-
-    # ================================================================ barge-in
-    async def _interrupt_nolock(self):
-        """The user started talking while the assistant was thinking or speaking."""
-        turn, self.turn = self.turn, None
-        if turn is None:
-            return
-        log.info("barge-in on turn %d (played %d ms)", turn.turn_id, self.played_ms)
-
-        await self.send_event({"type": "clear"})  # 1. silence the speakers first
-        self._discard(turn)  # 2. stop the model, the tools that only read, and the TTS (clean-up runs in the background)
-        self._cancel_drain_watchdog()
-
-        heard = turn.heard_text(self.played_ms)  # 3. remember only what was actually heard
-        log.info("turn %d: the caller heard %r", turn.turn_id, heard)
-        self.memory.add_exchange(turn.user_text, heard)
-        pending = self.memory.pending
-        if pending is not None and pending.turn_no == turn.turn_id and len(heard) < 0.85 * len(pending.question):
-            # the caller did not hear the whole confirmation question, so a later "yes" must not count
-            log.info("the confirmation question was interrupted: it will be asked again")
-            self.memory.pending = None
-        self.awaiting_drain = False
-        self.played_ms = 0
-        await self.send_event({"type": "interrupted", "heard": heard})
-        await self._set_state("listening")
-        await self._tune_end_of_turn()  # the caller may be answering the question they just heard

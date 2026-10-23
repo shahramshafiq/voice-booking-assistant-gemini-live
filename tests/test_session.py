@@ -5,6 +5,7 @@ The test plays Gemini (what it heard, what it says, which tools it calls) and th
 playback reports), and checks what the caller would hear, what reaches the calendar and what the page shows.
 """
 import asyncio
+import base64
 import json
 from array import array
 from dataclasses import replace
@@ -252,6 +253,45 @@ def test_a_yes_over_the_very_end_of_the_question_counts():
         await call.gemini.finish()
         await until(lambda: call.session.awaiting_drain)
         await call.played(share=0.95)
+        await call.gemini.hear(" Yes.")
+        done = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
+        assert done["response"]["ok"] and len(call.google.events) == 1
+
+    run(scenario)
+
+
+def test_a_question_queued_behind_another_answer_is_timed_from_its_own_start():
+    async def scenario(call):
+        await call.gemini.say("One moment.", audio_ms=4000)  # a first answer, still playing...
+        await call.gemini.finish()
+        await until(lambda: call.session.awaiting_drain)
+        asked = await call.gemini.call_tool("create_booking", BOOK, call_id="c1")  # ...when the next one starts
+        await call.gemini.say(asked["response"]["say"], audio_ms=6000)
+        await call.gemini.finish()
+        await until(lambda: call.session.awaiting_drain)
+        call.browser.control({"type": "playback_started"})
+        call.browser.control({"type": "playback_progress", "played_ms": 6000})  # 4 s of the first, 2 s of the question
+        await until(lambda: call.session.played_ms == 6000)
+        await call.gemini.hear(" Yes.")  # said a third of the way into the question
+        await until(lambda: call.browser.of_type("clear"))
+        again = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
+        assert again["response"]["error"] == "CONFIRMATION_REQUIRED" and call.google.events == {}
+
+    run(scenario)
+
+
+def test_gemini_text_after_turn_complete_belongs_to_the_answer_still_playing():
+    async def scenario(call):
+        asked = await call.gemini.call_tool("create_booking", BOOK, call_id="c1")
+        sound = base64.b64encode(b"\x01\x00" * 72000).decode()  # 3 s at 24 kHz
+        await call.gemini.send({"serverContent": {"modelTurn": {"parts": [{"inlineData": {
+            "mimeType": "audio/pcm;rate=24000", "data": sound}}]}}})
+        await call.gemini.finish()
+        await call.gemini.send({"serverContent": {"outputTranscription": {"text": asked["response"]["say"]}}})  # text last
+        await until(lambda: call.session.awaiting_drain)
+        await asyncio.sleep(0.1)
+        assert len(call.browser.of_type("reply")) == 1  # no second, empty answer was started
+        await call.played()
         await call.gemini.hear(" Yes.")
         done = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
         assert done["response"]["ok"] and len(call.google.events) == 1

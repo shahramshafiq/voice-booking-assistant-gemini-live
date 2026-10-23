@@ -79,6 +79,7 @@ class Reply:
         self.timer = timer
         self.after_speech = after_speech  # it answers something the caller just said (so its latency means something)
         self.audio_bytes = 0
+        self.offset_ms = 0.0  # sound still waiting in the browser's player when this answer began
         self.text = ""  # what Gemini said, from its own transcript
         self.finished = False  # turnComplete: all of its audio has arrived
         self.asks_to_confirm = False  # the confirmation question is read out in this answer
@@ -109,7 +110,8 @@ class VoiceSession:
         self.replies = 0
         self.state = "idle"  # idle, connecting, listening, thinking, speaking
         self.awaiting_drain = False  # all audio of the answer arrived, the speakers are still playing it
-        self.played_ms = 0
+        self.played_ms = 0  # what the browser has played since its player was last empty
+        self._queued_ms = 0.0  # what we have sent to the browser since its player was last empty
         self.last_activity = time.monotonic()
         self.tokens_used = 0
         self.closed = False
@@ -313,6 +315,7 @@ class VoiceSession:
             if live is not None:
                 await live.close()  # the next conversation gets a new Gemini session: it never sees this one
             await self.send_event({"type": "clear"})
+            self._speakers_emptied()
             if error_message:
                 await self.send_event({"type": "error", "message": error_message})
             if self.tokens_used:
@@ -469,8 +472,9 @@ class VoiceSession:
         if reply is not None and not reply.finished:
             return reply
         if reply is not None:
-            # the previous answer has all arrived but is still playing; the new one plays after it
-            self._end_reply_nolock(reply, heard=False)
+            # the previous answer has all arrived but is still playing, and the new one plays after it. A question in it
+            # counts as heard if the caller has already heard most of it (they may be answering it right now).
+            self._end_reply_nolock(reply, heard=self._played_share(reply) >= self.settings.confirm_heard_share)
         spoke = self._last_loud
         after_speech = spoke is not None and time.perf_counter() - spoke < SPEECH_IS_RECENT_SECONDS
         timer = TurnTimer()
@@ -478,6 +482,7 @@ class VoiceSession:
         timer.mark("answer_started")
         self.replies += 1
         reply = Reply(self.replies, timer, after_speech)
+        reply.offset_ms = self._queued_ms  # sound still waiting in the browser ahead of this answer
         reply.asks_to_confirm, self._next_reply_asks = self._next_reply_asks, False
         self.reply = reply
         if not self._caller_open:
@@ -493,13 +498,15 @@ class VoiceSession:
             reply.timer.mark("first_audio")
             await self._set_state("speaking")
         reply.audio_bytes += len(pcm)
+        self._queued_ms += len(pcm) / (self.settings.gemini_output_sample_rate * 2) * 1000
         self.last_activity = time.monotonic()
         await self.send_audio(pcm)
 
     async def _on_answer_text(self, text):
         """A piece of Gemini's transcript of its own answer. The output guardrail checks it. Gemini makes sound faster
-        than it is played, so this text normally arrives well before the caller hears the same words."""
-        reply = await self._answer()
+        than it is played, so this text normally arrives well before the caller hears the same words. The text can
+        also come after turnComplete: it then belongs to the answer that is still playing, never to a new one."""
+        reply = self.reply if self.reply is not None else await self._answer()
         if reply.blocked:
             return
         reply.text += text
@@ -519,9 +526,10 @@ class VoiceSession:
         reply.blocked = True
         reply.replacement = verdict.text
         log.warning("reply %d stopped by the output guardrail (%s); %.0f of %.0f ms of its sound had been played: %r",
-                    reply.number, verdict.reason, self.played_ms, reply.audio_ms(self.settings.gemini_output_sample_rate),
-                    reply.text[-120:])
+                    reply.number, verdict.reason, self.played_ms - reply.offset_ms,
+                    reply.audio_ms(self.settings.gemini_output_sample_rate), reply.text[-120:])
         await self.send_event({"type": "clear"})  # silence the speakers at once
+        self._speakers_emptied()
         await self.send_event({"type": "interrupted"})
         if reply.finished:  # all of it had arrived already: end it now and ask for the replacement
             self._end_reply_nolock(reply, heard=False)
@@ -558,7 +566,8 @@ class VoiceSession:
         # all audio has arrived; tell the browser no more is coming and wait for it to finish playing
         await self.send_event({"type": "audio_end"})
         self.awaiting_drain = True
-        wait = reply.audio_ms(self.settings.gemini_output_sample_rate) / 1000 + self.settings.drain_grace_seconds
+        still_to_play = reply.offset_ms + reply.audio_ms(self.settings.gemini_output_sample_rate) - self.played_ms
+        wait = max(still_to_play, 0) / 1000 + self.settings.drain_grace_seconds
         self._drain_task = asyncio.create_task(self._drain_watchdog(reply, wait))
 
     async def _on_interrupted(self):
@@ -570,9 +579,10 @@ class VoiceSession:
         if reply.finished:  # all of it had arrived; only its end was still playing
             await self._stop_playback_nolock(reply, "barge-in")
             return
-        log.info("barge-in on reply %d (played %d of %.0f ms)", reply.number, self.played_ms,
+        log.info("barge-in on reply %d (played %.0f of %.0f ms)", reply.number, self.played_ms - reply.offset_ms,
                  reply.audio_ms(self.settings.gemini_output_sample_rate))
         await self.send_event({"type": "clear"})
+        self._speakers_emptied()
         await self.send_event({"type": "interrupted"})
         self._end_reply_nolock(reply, heard=False)  # it was cut off while being generated: the question was not complete
         self._send_replacement(reply)
@@ -580,17 +590,30 @@ class VoiceSession:
 
     async def _stop_playback_nolock(self, reply, why):
         """The caller talks over the end of an answer that is still playing in the browser."""
-        rate = self.settings.gemini_output_sample_rate
-        played_share = self.played_ms / max(reply.audio_ms(rate), 1.0)
-        log.info("%s: speakers stopped (reply %d, played %d of %.0f ms)", why, reply.number, self.played_ms, reply.audio_ms(rate))
+        played_share = self._played_share(reply)
+        log.info("%s: speakers stopped (reply %d, played %.0f%% of %.0f ms)", why, reply.number, played_share * 100,
+                 reply.audio_ms(self.settings.gemini_output_sample_rate))
         await self.send_event({"type": "clear"})
+        self._speakers_emptied()
         await self.send_event({"type": "interrupted"})
         self._end_reply_nolock(reply, heard=played_share >= self.settings.confirm_heard_share)
         await self._set_state("listening")
 
     async def _finish_playback_nolock(self):
         self._end_reply_nolock(self.reply, heard=True)
+        self._speakers_emptied()
         await self._set_state("listening")
+
+    def _played_share(self, reply):
+        """How much of this answer the caller has heard. The browser counts everything it played since its player was
+        last empty, which can include the end of the answer before this one."""
+        played = self.played_ms - reply.offset_ms
+        return played / max(reply.audio_ms(self.settings.gemini_output_sample_rate), 1.0)
+
+    def _speakers_emptied(self):
+        """The browser's player was cleared or has played everything: its count starts again from zero."""
+        self.played_ms = 0
+        self._queued_ms = 0.0
 
     def _end_reply_nolock(self, reply, heard):
         """The answer is over. If it read out the confirmation question, decide whether the caller heard it."""
@@ -599,7 +622,6 @@ class VoiceSession:
         self.reply = None
         self.awaiting_drain = False
         self._cancel_drain_watchdog()
-        self.played_ms = 0
         pending = self.memory.pending
         if not reply.asks_to_confirm or pending is None:
             return

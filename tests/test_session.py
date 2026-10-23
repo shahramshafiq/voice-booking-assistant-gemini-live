@@ -52,9 +52,11 @@ class FakeBrowser:
         self.inbox = asyncio.Queue()
 
     async def send_json(self, event):
+        await asyncio.sleep(0)  # a real WebSocket send gives other tasks a turn
         self.events.append(event)
 
     async def send_bytes(self, data):
+        await asyncio.sleep(0)
         self.audio += data
 
     async def receive(self):
@@ -350,6 +352,18 @@ def test_an_interruption_stops_the_speakers_and_the_next_sound_is_a_new_answer()
         await call.gemini.say("Great, 9 AM it is.")
         await until(lambda: call.session.reply is not None)
         assert call.session.reply is not first and len(call.browser.of_type("reply")) == 2
+
+    run(scenario)
+
+
+def test_when_the_browser_never_reports_the_end_of_playback_the_call_goes_on():
+    async def scenario(call):
+        await call.gemini.say("We are open from 9 to 5.", audio_ms=300)
+        await call.gemini.finish()
+        await until(lambda: call.session.awaiting_drain)
+        # the browser says nothing; after the sound's length plus DRAIN_GRACE_SECONDS the server finishes by itself
+        await until(lambda: call.browser.of_type("state")[-1]["value"] == "listening", timeout=4)
+        assert call.session.reply is None
 
     run(scenario)
 

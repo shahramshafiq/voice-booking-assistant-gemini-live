@@ -655,9 +655,9 @@ class VoiceSession:
                 await self._finish_playback_nolock()
 
     def _cancel_drain_watchdog(self):
-        if self._drain_task is not None:
-            self._drain_task.cancel()
-            self._drain_task = None
+        task, self._drain_task = self._drain_task, None
+        if task is not None and task is not asyncio.current_task():  # the watchdog itself must not cancel itself
+            task.cancel()
 
     # ---------------------------------------------------------------- tools
     async def _on_tool_call(self, tool_call):

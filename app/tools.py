@@ -3,9 +3,9 @@
 Gemini never touches the calendar. It asks, and ToolRunner decides:
   - the input is checked against the schema (bad input comes back as a clear error);
   - READ tools run at once, because they change nothing;
-  - WRITE tools (create, reschedule, cancel) only run if the caller said "yes" to this exact action AFTER they had
-    heard the question. Otherwise the action is parked as "pending" and the result carries the read-back question,
-    written by the code, for Gemini to read out word for word;
+  - WRITE tools (create, reschedule, cancel) only run if the caller said "yes" to this exact action in their answer
+    right after hearing the question. Otherwise the action is parked as "pending" and the result carries the
+    read-back question, written by the code, for Gemini to read out word for word;
   - in a turn the input guardrail blocked, no tool runs at all.
 """
 import asyncio
@@ -148,12 +148,14 @@ class ToolRunner:
         return template.format(service=result.get("service"), when=result.get("label"),
                                reference=spell_digits(str(result.get("booking_reference") or "")))
 
-    async def caller_said_yes(self):
-        """Did the caller say yes after hearing the question? Gemini can understand the answer a moment before its
-        text of it reaches us, so wait up to LIVE_TRANSCRIPT_WAIT_MS for the text."""
+    async def caller_said_yes(self, pending):
+        """Did the caller say yes in their answer to the question? Gemini can understand the answer a moment before
+        its text of it reaches us, so wait up to LIVE_TRANSCRIPT_WAIT_MS for the text."""
         deadline = time.monotonic() + self.settings.live_transcript_wait_ms / 1000
         while True:
-            words = self.memory.words_since(self.memory.pending.heard_at)
+            if self.memory.pending is not pending:
+                return False  # another call replaced or finished the question meanwhile
+            words = self.memory.answer_to(pending)
             if self.is_affirmative(words):
                 return True
             if self.is_refusal(words) or time.monotonic() >= deadline:
@@ -176,7 +178,7 @@ class ToolRunner:
                           "message": f"The safety filter blocked what the caller said. Do not do it. Say: {self.settings.input_block_reply}"}
             else:
                 args = self._parse(spec, raw_arguments)
-                result, recorded = await self._dispatch(spec, args)
+                result, recorded = await self._dispatch(spec, args, ctx)
         except ValueError as exc:  # bad JSON or bad fields
             result = {"ok": False, "error": "INVALID_INPUT", "message": str(exc)}
         except BookingError as exc:
@@ -226,7 +228,7 @@ class ToolRunner:
         if result.get("ok"):
             self.memory.achieved.add(name)
 
-    async def _dispatch(self, spec, args):
+    async def _dispatch(self, spec, args, ctx):
         """Returns (result, recorded)."""
         if spec.name in NEEDS_VERIFICATION and self.memory.verify_failures >= self.settings.max_verify_failures:
             return {"ok": False, "error": "TOO_MANY_ATTEMPTS",
@@ -234,19 +236,21 @@ class ToolRunner:
         if not spec.write:
             method = getattr(self.service, spec.name)
             return await asyncio.wait_for(method(args), self.settings.tool_timeout_seconds), False
-        return await self._run_write(spec, args)
+        return await self._run_write(spec, args, ctx)
 
-    async def _run_write(self, spec, args):
+    async def _run_write(self, spec, args, ctx):
         # Step 1: check everything against the calendar. Nothing is changed here. The confirmation QUESTION is checked
         # against the in-memory calendar window; the check right before the real change always asks Google.
         pending = self.memory.pending
-        answering = pending is not None and pending.tool == spec.name and pending.heard_at is not None
+        answering = pending is not None and pending.tool == spec.name and pending.answer_turn == ctx.turn_no
         plan = await self.service.prepare(spec.name, args, self.memory.verified_booking, fresh=answering)
         if plan.result is not None:  # an error, or a retry of something already done: nothing to confirm
             return plan.result, False
 
-        # Step 2: the real change needs a yes to exactly this action, said after the caller heard the question.
-        confirmed = self.memory.pending_is_confirmable(plan.key) and await self.caller_said_yes()
+        # Step 2: the real change needs a yes to exactly this action, said in the caller's answer to the question
+        # (the turn right after they heard it). A yes from any other turn never counts.
+        pending = self.memory.pending
+        confirmed = self.memory.pending_is_confirmable(plan.key, ctx.turn_no) and await self.caller_said_yes(pending)
         if not confirmed:
             self.memory.set_pending(plan.key, spec.name, plan.question)
             log.info("%s is waiting for the caller's yes", spec.name)

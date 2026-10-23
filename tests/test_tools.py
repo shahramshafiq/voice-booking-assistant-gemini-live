@@ -123,6 +123,30 @@ def test_a_yes_before_the_question_was_heard_does_not_count():
     assert third["error"] == "CONFIRMATION_REQUIRED" and fake.events == {}
 
 
+def test_only_the_answer_right_after_the_question_can_confirm():
+    fake, _, memory, runner = setup()
+    ask(runner, memory, BOOK)
+    turn(memory, "Okay, and how much does it cost?")  # an "okay" that is not an answer to the question...
+    later = call(runner, "create_booking", BOOK, turn(memory, "Hmm, let me think about it"))  # ...two turns later
+    assert later["error"] == "CONFIRMATION_REQUIRED" and fake.events == {}
+
+
+def test_a_second_call_that_replaces_the_question_never_crashes_the_first():
+    _, _, memory, runner = setup()
+    ask(runner, memory, BOOK)
+    ctx = turn(memory, "")  # the yes has not arrived yet, so the first call waits for it
+
+    async def two_calls():
+        first = asyncio.ensure_future(runner.run("create_booking", BOOK, ctx))
+        await asyncio.sleep(0.05)
+        changed = dict(BOOK, start_time="2026-10-20T10:00:00+05:00", end_time="2026-10-20T11:00:00+05:00")
+        second = await runner.run("create_booking", changed, ctx)  # a new question replaces the old one
+        return await first, second
+
+    first, second = asyncio.run(two_calls())
+    assert first["error"] == second["error"] == "CONFIRMATION_REQUIRED"  # no INTERNAL_ERROR
+
+
 def test_no_or_unclear_answers_do_not_confirm():
     fake, _, memory, runner = setup()
     for answer in ("No, wait", "hmm let me think", "don't do it", "yes but not tomorrow"):

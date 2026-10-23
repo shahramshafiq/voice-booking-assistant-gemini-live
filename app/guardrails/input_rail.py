@@ -1,10 +1,12 @@
-"""The input guardrail: checks what the caller said BEFORE the model sees it.
+"""The input guardrail: checks Gemini's transcript of what the caller said.
 
-It is plain code (no extra model call), so it adds no noticeable delay. It can:
-  - block a message that tries to change the assistant's rules or asks for secrets;
-  - block a message that is far too long;
-  - remove a credit card number, so it never reaches the model, the logs or the history.
-A blocked message gets a fixed spoken reply and the model is not called at all.
+It is plain code (no extra model call), so it adds no noticeable delay. It finds:
+  - a request that tries to change the assistant's rules or asks for secrets;
+  - a turn that is far too long;
+  - a credit card number.
+Gemini hears the caller's audio itself, so nothing can be hidden from the model. Instead, in a blocked turn no
+tool runs at all (the model cannot be talked into changing the calendar), and a card number is removed from
+the page and the logs.
 """
 import logging
 import re

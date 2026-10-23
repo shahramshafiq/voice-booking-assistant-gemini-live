@@ -47,6 +47,30 @@ def _content_words(text):
     return set(re.findall(r"[a-z']{3,}", text.lower().replace("\u2019", "'")))
 
 
+WEEKDAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+RELATIVE_DAYS = {"today", "tomorrow"}
+MONTHS = "january|february|march|april|may|june|july|august|september|october|november|december"
+TIME = re.compile(r"\b(\d{1,2})(?:[:.](\d{2}))?\s*([ap])\.?\s?m\b")  # 9 AM, 9:30 pm, 9.30 a.m.
+DATE = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({MONTHS})\b")  # 20 October, the 20th of October
+
+
+def _facts(text):
+    """The times, dates and day words in a sentence: ({(9, 0, 'a'), (20, 'october'), 'tomorrow'}, {'tuesday'})."""
+    low = text.lower()
+    facts = {(int(hour) % 12, int(minute or 0), half) for hour, minute, half in TIME.findall(low)}
+    facts |= {(int(day), month) for day, month in DATE.findall(low)}
+    words = set(re.findall(r"[a-z]+", low))
+    return facts | (words & RELATIVE_DAYS), words & WEEKDAYS
+
+
+def _read_back_differs(question, said):
+    """Did Gemini name a time, a date or a day that the code's question does not have (10 AM instead of 9 AM)?
+    Numbers Gemini's transcript writes as words are not judged. A weekday next to "tomorrow" is allowed."""
+    asked, asked_weekdays = _facts(question)
+    told, told_weekdays = _facts(said)
+    return bool(told - asked) or bool(asked_weekdays and told_weekdays - asked_weekdays)
+
+
 class Reply:
     """One answer from Gemini: from its first sound, text or tool call until turnComplete or an interruption."""
 
@@ -581,12 +605,14 @@ class VoiceSession:
             return
         wanted = _content_words(pending.question)
         share = len(wanted & _content_words(reply.text)) / max(len(wanted), 1)
-        if heard and share >= self.settings.read_back_min_share:
+        differs = _read_back_differs(pending.question, reply.text)
+        if heard and share >= self.settings.read_back_min_share and not differs:
             self.memory.question_heard()
             log.info("the caller has heard the confirmation question (%.0f%% of its words were read out)", share * 100)
         else:
-            log.info("the confirmation question was %s (%.0f%% of its words were read out): it will be asked again",
-                     "heard" if heard else "cut short", share * 100)
+            why = "cut short" if not heard else ("read out with a different time or day" if differs else "not read out")
+            log.info("the confirmation question was %s (%.0f%% of its words were said: %r): it will be asked again",
+                     why, share * 100, reply.text.strip()[-120:])
             self.memory.pending = None
 
     async def _drain_watchdog(self, reply, wait):

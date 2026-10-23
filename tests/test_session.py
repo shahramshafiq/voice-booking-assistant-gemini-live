@@ -17,7 +17,7 @@ from app.config import settings as base_settings
 from app.guardrails.input_rail import InputRail
 from app.guardrails.output_rail import OutputRail
 from app.prompt import build_instructions
-from app.session import VoiceSession
+from app.session import VoiceSession, _read_back_differs
 from tests.fake_gemini_live import FakeGeminiLive
 from tests.fake_google import FakeGoogleCalendar
 
@@ -268,6 +268,32 @@ def test_a_question_gemini_did_not_read_out_is_asked_again():
         assert again["response"]["error"] == "CONFIRMATION_REQUIRED" and call.google.events == {}
 
     run(scenario)
+
+
+def test_a_read_back_with_a_different_time_is_asked_again():
+    async def scenario(call):
+        asked = await call.gemini.call_tool("create_booking", BOOK, call_id="c1")
+        await call.read_back(asked["response"]["say"].replace("9 AM", "10 AM"))  # Gemini misreads the time
+        await call.gemini.hear(" Yes.")
+        again = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
+        assert again["response"]["error"] == "CONFIRMATION_REQUIRED" and call.google.events == {}
+
+    run(scenario)
+
+
+def test_the_read_back_check_finds_a_different_time_date_or_day():
+    question = ("Just to confirm: a Consultation tomorrow at 9 AM, for Ali Raza, phone number 0 3 0, 0 1 2, 3 4 5, 6 7. "
+                "Shall I book it?")
+    assert not _read_back_differs(question, question)
+    assert not _read_back_differs(question, "Just to confirm, a consultation tomorrow at 9 a.m. for Ali Raza. Shall I book it?")
+    assert not _read_back_differs(question, "a consultation tomorrow, Tuesday, at nine AM")  # a weekday next to tomorrow is fine
+    assert _read_back_differs(question, "a consultation tomorrow at 10 AM")
+    assert _read_back_differs(question, "a consultation today at 9 AM")
+    move = ("Just to confirm: you want to move your Consultation Tuesday 20 October at 9 AM to Friday 23 October at 3:30 PM. "
+            "Shall I go ahead?")
+    assert not _read_back_differs(move, "move your consultation on Tuesday the 20th of October at 9 AM to Friday the 23rd of "
+                                        "October at 3.30 p.m.")
+    assert _read_back_differs(move, "move it to Thursday 22 October at 3:30 PM")
 
 
 # ---------------------------------------------------------------------- barge-in

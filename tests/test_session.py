@@ -7,7 +7,9 @@ playback reports), and checks what the caller would hear, what reaches the calen
 import asyncio
 import base64
 import json
+import time
 from array import array
+from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -426,6 +428,25 @@ def test_gemini_closing_mid_call_ends_it_with_the_reason():
         assert "1011: Internal error encountered." in call.browser.of_type("error")[0]["message"]
         await until(lambda: call.session.state == "idle")
         await until(lambda: call.gemini.connections == 2)  # a new Gemini session is prepared for the next Start
+
+    run(scenario)
+
+
+def test_stop_is_quick_even_while_gemini_is_sending_sound():
+    async def scenario(call):
+        async def flood():
+            with suppress(Exception):
+                for _ in range(400):
+                    await call.gemini.say("We also have later times.", audio_ms=200)
+
+        flooding = asyncio.create_task(flood())
+        await until(lambda: len(call.browser.audio) > 0)
+        started = time.perf_counter()
+        call.browser.control({"type": "stop"})
+        await until(lambda: call.gemini.connections == 2, timeout=12)  # the next call's Gemini session is ready
+        took = time.perf_counter() - started
+        flooding.cancel()
+        assert took < 3, f"stopping took {took:.1f} s"
 
     run(scenario)
 

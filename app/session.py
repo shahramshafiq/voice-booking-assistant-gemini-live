@@ -295,6 +295,8 @@ class VoiceSession:
         """A new Gemini session with fresh instructions (they carry the current date and time)."""
         if self.live is not None:
             await self.live.close()
+        if self.closed:
+            return  # the page has gone meanwhile
         live = GeminiLive(self.settings, self._on_live_message, None)
         live.on_closed = lambda reason: self._on_live_closed(live, reason)
         self.live = live
@@ -311,9 +313,7 @@ class VoiceSession:
             self.awaiting_drain = False
             self.reply = None
             self._caller_open = False
-            live, self.live = self.live, None
-            if live is not None:
-                await live.close()  # the next conversation gets a new Gemini session: it never sees this one
+            live, self.live = self.live, None  # the next conversation gets a new Gemini session: it never sees this one
             await self.send_event({"type": "clear"})
             self._speakers_emptied()
             if error_message:
@@ -322,6 +322,10 @@ class VoiceSession:
                 log.info("this call used %d tokens (as reported by Gemini)", self.tokens_used)
                 self.tokens_used = 0
             await self._set_state("idle")
+        if live is not None:
+            # Closed only after the lock is free: Gemini's reader may be waiting for the lock with its last messages,
+            # and it has to keep reading for the close to finish (otherwise it waits for a 10 s timeout).
+            await live.close()
         if rewarm and not self.closed:
             self._spawn(self._prewarm())  # so the next Start is instant too
 
@@ -333,6 +337,11 @@ class VoiceSession:
             self._calendar_task = None
         await self._stop_conversation(rewarm=False)
         self.closed = True
+        for task in list(self._background):  # for example a prewarm that is still connecting to Gemini
+            task.cancel()
+        if self.live is not None:
+            await self.live.close()
+            self.live = None
         log.info("session closed")
 
     async def _on_live_closed(self, live, reason):

@@ -45,16 +45,19 @@ TOOLS = {spec.name: spec for spec in [
              "Find free appointment times for a service over one or more days. Use this to offer times."),
     ToolSpec("create_booking", CreateBookingArgs,
              "Book an appointment. Call it as soon as you have the service, the time, the name and the phone number, "
-             "without asking the caller first. The result's say field is the confirmation question: read it out word for "
-             "word. After the caller says yes, call it again with the same details.", write=True),
+             "without asking the caller first. The result's say field is the confirmation question: read it out loud "
+             "word for word and wait for the answer. Do NOT call any tool until the caller answers. After the yes, "
+             "call it again with the same details.", write=True),
     ToolSpec("get_booking", BookingLookupArgs, "Look up a booking by reference and phone number."),
     ToolSpec("reschedule_booking", RescheduleArgs,
              "Move a booking to a new day and time. Call it as soon as you have the new time, without asking the caller "
-             "first. Read the say field of the result out word for word. After the yes, call it again with the same details.",
+             "first. Read the say field of the result out loud word for word and wait for the answer. Do NOT call any "
+             "tool until the caller answers. After the yes, call it again with the same details.",
              write=True),
     ToolSpec("cancel_booking", BookingLookupArgs,
              "Cancel a booking. Call it as soon as the caller asks to cancel, without asking them first. Read the say "
-             "field of the result out word for word. After the yes, call it again with the same details.", write=True),
+             "field of the result out loud word for word and wait for the answer. Do NOT call any tool until the "
+             "caller answers. After the yes, call it again with the same details.", write=True),
 ]}
 
 NEEDS_VERIFICATION = {"get_booking", "reschedule_booking", "cancel_booking"}
@@ -258,8 +261,9 @@ class ToolRunner:
             self.memory.set_pending(plan.key, spec.name, plan.question)
             log.info("%s is waiting for the caller's yes", spec.name)
             return {"ok": False, "error": "CONFIRMATION_REQUIRED", "say": plan.question,
-                    "message": "Nothing has been done yet. Read the say sentence to the caller word for word, from its "
-                               "first word to its last, and wait for the answer."}, False
+                    "message": "STOP. Nothing has been done yet. Do NOT call any tool now. Read the say sentence to the "
+                               "caller out loud, word for word, from its first word to its last. Then wait silently "
+                               "for the caller to answer yes or no."}, False
         self.memory.pending = None
 
         # From here on the change must finish even if the caller interrupts. The memory is therefore

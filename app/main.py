@@ -7,14 +7,13 @@ from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .agent import build_instructions
 from .booking.calendar_client import CalendarClient
 from .booking.service import BookingService
 from .config import settings
 from .guardrails.input_rail import InputRail
 from .guardrails.output_rail import OutputRail
-from .llm import LLMClient
 from .logging_setup import setup_logging
+from .prompt import build_instructions
 from .session import VoiceSession
 
 setup_logging(settings.log_level)
@@ -26,22 +25,17 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 @asynccontextmanager
 async def lifespan(app):
     # everything below is created once and shared by every browser session
-    llm = LLMClient(settings)
-    llm.start_warmup()
     calendar = CalendarClient(settings)
-    instructions = build_instructions(settings)
-
-    app.state.llm = llm
+    service = BookingService(settings, calendar)
     app.state.calendar = calendar
-    app.state.service = BookingService(settings, calendar)
+    app.state.service = service
     app.state.input_rail = InputRail(settings)
-    app.state.output_rail = OutputRail(settings, instructions)
-    app.state.instructions = instructions
+    # the output guardrail protects the rules part of the instructions, which is the same for every conversation
+    app.state.output_rail = OutputRail(settings, build_instructions(settings, service.now()))
 
-    log.info("ready: LLM=%s STT=%s TTS=%s calendar=%s", settings.openai_model, settings.deepgram_model,
-             settings.elevenlabs_model, settings.google_calendar_id)
+    log.info("ready: Gemini Live model=%s voice=%s calendar=%s", settings.gemini_live_model, settings.gemini_voice,
+             settings.google_calendar_id)
     yield
-    await llm.close()
     await calendar.close()
     log.info("shut down")
 
@@ -65,6 +59,6 @@ async def voice_socket(websocket: WebSocket):
     await websocket.accept()
     log.info("browser connected")
     state = websocket.app.state
-    session = VoiceSession(websocket, settings, state.llm, state.service, state.input_rail, state.output_rail, state.instructions)
+    session = VoiceSession(websocket, settings, state.service, state.input_rail, state.output_rail)
     await session.run()
     log.info("browser disconnected")

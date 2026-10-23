@@ -86,13 +86,13 @@ class FakeGeminiLive:
         await self.send({"serverContent": {"inputTranscription": {"text": text}}})
 
     async def say(self, text, audio_ms=500):
-        """Gemini speaks: its transcript of the sentence, then the sound in two pieces."""
-        await self.send({"serverContent": {"outputTranscription": {"text": text}}})
+        """Gemini speaks: the sound in two pieces, then its transcript of it (Gemini makes the text from the sound)."""
         pcm = b"\x01\x00" * (OUTPUT_RATE * audio_ms // 1000)
         half = len(pcm) // 4 * 2
         for piece in (pcm[:half], pcm[half:]):
             await self.send({"serverContent": {"modelTurn": {"parts": [
                 {"inlineData": {"mimeType": f"audio/pcm;rate={OUTPUT_RATE}", "data": base64.b64encode(piece).decode()}}]}}})
+        await self.send({"serverContent": {"outputTranscription": {"text": text}}})
 
     async def finish(self, total_tokens=None):
         await self.send({"serverContent": {"generationComplete": True}})

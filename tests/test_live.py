@@ -191,7 +191,7 @@ def test_the_audio_and_text_frames_of_the_real_service_are_both_understood():
         await fake.connection.send('{"serverContent": {"turnComplete": true}}')  # a text frame instead of binary
         await fake.say("Hello.", audio_ms=100)
         await until(lambda: len(recorder.messages) == 4)
-        parts = [m["serverContent"]["modelTurn"]["parts"][0]["inlineData"]["data"] for m in recorder.messages[2:]]
+        parts = [m["serverContent"]["modelTurn"]["parts"][0]["inlineData"]["data"] for m in recorder.messages[1:3]]
         assert sum(len(base64.b64decode(p)) for p in parts) == 4800  # 100 ms at 24 kHz, 2 bytes per sample
         await live.close()
         await fake.stop()

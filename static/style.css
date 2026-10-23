@@ -60,6 +60,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .msg.user { background: #e0ecff; align-self: flex-end; }
 .msg.assistant { background: #f1f3f5; align-self: flex-start; }
 .msg.interrupted::after { content: " [interrupted]"; color: #b45309; font-size: 13px; }
+.msg:empty { display: none; }  /* a bubble waits hidden until its words arrive */
 
 table { border-collapse: collapse; width: 100%; font-size: 14px; }
 td { padding: 4px 8px; border-bottom: 1px solid #eef0f3; }

@@ -9,7 +9,7 @@
 <body>
     <main>
         <h1>Voice Booking Assistant</h1>
-        <p class="hint">Book, check, move or cancel an appointment by talking. Use headphones for the best results. Without them the assistant can hear itself.</p>
+        <p class="hint">Book, check, move or cancel an appointment by talking. Powered by the Gemini Live API. Use headphones for the best results. Without them the assistant can hear itself.</p>
 
         <div class="controls">
             <button id="toggle">Start conversation</button>
@@ -33,7 +33,7 @@
 
         <section class="panel">
             <h2>Latency of the last reply</h2>
-            <p class="hint">All times are in milliseconds, measured from the moment the system decided you had finished speaking. A negative number means the work started earlier, while it was guessing ahead.</p>
+            <p class="hint">All times are in milliseconds, measured from your last word. Gemini decides by itself when you have finished, so your last word is estimated from the loudness of your microphone.</p>
             <table id="metrics"><tbody><tr><td>No reply yet.</td></tr></tbody></table>
             <p id="average" class="hint"></p>
         </section>

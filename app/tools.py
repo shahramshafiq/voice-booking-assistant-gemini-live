@@ -124,7 +124,7 @@ class ToolRunner:
         return name in TOOLS and TOOLS[name].write
 
     def _cleaned(self, text):
-        return re.sub(r"[^a-z' ]", " ", text.lower().replace("’", "'"))
+        return re.sub(r"[^a-z' ]", " ", text.lower().replace("\u2019", "'"))
 
     def is_refusal(self, text):
         return bool(self._no and self._no.search(self._cleaned(text)))

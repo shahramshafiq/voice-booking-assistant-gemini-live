@@ -44,7 +44,7 @@ SPEECH_IS_RECENT_SECONDS = 10
 
 def _content_words(text):
     """Words of three letters or more. Digits are left out: transcripts write spoken digits in different ways."""
-    return set(re.findall(r"[a-z']{3,}", text.lower().replace("’", "'")))
+    return set(re.findall(r"[a-z']{3,}", text.lower().replace("\u2019", "'")))
 
 
 class Reply:

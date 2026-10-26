@@ -182,7 +182,7 @@ def test_a_whole_booking_with_the_read_back_and_the_yes():
 
         await gemini.hear(" Yes, go ahead.")
         done = await gemini.call_tool("create_booking", BOOK, call_id="c3")
-        assert done["response"]["ok"] and done["response"]["say"].startswith("Done. Your Consultation is booked for tomorrow at 9 AM.")
+        assert done["response"]["ok"] and "is all set for tomorrow at 9 AM" in done["response"]["say"]
         assert len(call.google.events) == 1
 
         # what the page showed

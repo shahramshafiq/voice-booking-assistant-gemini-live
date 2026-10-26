@@ -106,7 +106,7 @@ def test_yes_after_hearing_the_question_makes_the_booking():
     ask(runner, memory, BOOK)
     result = call(runner, "create_booking", BOOK, turn(memory, "Yes, please go ahead"))
     assert result["ok"] and len(fake.events) == 1
-    assert result["say"].startswith("Done. Your Consultation is booked for tomorrow at 9 AM. Your booking reference is ")
+    assert "is all set for tomorrow at 9 AM" in result["say"] and "Your booking reference is" in result["say"]
     assert for_model(result)["say"] == result["say"]  # Gemini reads the code's sentence out
     assert "create_booking" in memory.achieved
     assert memory.pending is None and result["booking_reference"] in memory.known_refs

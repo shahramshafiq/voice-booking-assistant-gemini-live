@@ -279,4 +279,6 @@ class ToolRunner:
         if result.get("ok"):
             # The code writes the announcement from the real result, so the numbers are always right.
             result["say"] = self.success_reply(spec.name, result)
+            result["message"] = ("The change is done. Continue naturally from what you just said and read the say "
+                                 "sentence out loud now, as a smooth continuation of the filler you just spoke.")
         return result, True

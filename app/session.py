@@ -761,12 +761,6 @@ class VoiceSession:
         reply.timer.mark("tools_done")
         if self.live is not None:
             self.live.send_tool_response([{"id": call_id, "name": name, "response": for_model(result)}])
-            # After a successful write tool, nudge Gemini to speak the result sentence immediately.
-            # Without this, Gemini can sit for 5 to 9 seconds of "thinking" before it starts reading
-            # the say field from the tool result.
-            say = result.get("say") if result.get("ok") else None
-            if say and self.runner.is_write(name):
-                self.live.send_note(f"[System note] Read this out loud to the caller right now: {say}")
 
     def _on_tool_cancellation(self, cancellation):
         for call_id in cancellation.get("ids") or []:

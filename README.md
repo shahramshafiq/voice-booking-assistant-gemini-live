@@ -8,7 +8,7 @@ A voice receptionist that books, looks up, moves and cancels appointments in Goo
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![Gemini Live](https://img.shields.io/badge/Gemini%20Live-gemini--3.8--live-8E75B2?style=flat-square&logo=googlegemini&logoColor=white)
 ![Google Calendar](https://img.shields.io/badge/Google%20Calendar-API%20v3-4285F4?style=flat-square&logo=googlecalendar&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-145%20passing-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-147%20passing-brightgreen?style=flat-square)
 
 </div>
 
@@ -44,14 +44,16 @@ Measured against the real Gemini Live API (`gemini-3.8-live`):
 2. The tool runs while the filler is being heard.
 3. Gemini holds its next sentence until the filler has been heard, then starts it a moment later (0.1 to 0.9 s in our runs), if the tool has answered by then.
 
-So a filler should last about as long as its tool plus Gemini's own 0.7 s: a longer one only makes the answer come later, a shorter one leaves a silence. Searches, lookups and the first call of a change read the copy of the calendar kept in memory (well under 0.1 s), so their fillers take about 1 s ("Let me check."). After your yes, the change goes to Google (1.1 to 1.6 s in a live test), so those fillers take about 2 s ("Great, I'm booking that for you now.").
+Every tool call is a full round trip of Gemini: it stops, waits for the result and then goes on. So the prompt asks for as few tool calls as possible and ONE filler per answer: a move or a cancellation goes straight to `reschedule_booking` or `cancel_booking`, which find and check the booking and the new time themselves, instead of looking the booking up and searching for times first (three round trips and three fillers in a row before this change). The fillers are neutral ("One moment.", "Let me check."): none of them says that a change is being made, because the code may still have to ask the caller to confirm.
+
+A filler should last about as long as its tool plus Gemini's own 0.7 s: a longer one only makes the answer come later, a shorter one leaves a silence. Searches, lookups and the first call of a change read the copy of the calendar kept in memory (well under 0.1 s), so their fillers take about 1 s ("Let me check."). After your yes, the change goes to Google (1.1 to 1.6 s in a live test), so those fillers take about 2 s ("Great, I'm booking that for you now.").
 
 Every tool result is sent with `scheduling: WHEN_IDLE` and, when it worked, a short "give the caller the answer now" nudge. Without them, `gemini-3.8-live` sometimes held a finished result back until the caller spoke again (once for 13 s in a live test). Gemini does not always say the filler: when it makes a confirmed change without one, the server plays a filler recorded in the same voice (`python -m scripts.make_fillers`), so the line is never silent while the calendar is written.
 
 ## Key Features
 
 - **Eight booking tools:** services, business config, calendar availability, slot search, create, look up, reschedule and cancel. All rules (opening hours, breaks, buffers, notice, durations, cancellation policy) live in backend code and `.env`, never in the model.
-- **Confirm before any change:** the first call to a change tool only parks the action and returns a read-back question written by the code. Gemini reads it out. The change happens only when the caller says yes in their answer after hearing that question. A yes spoken over the name, the phone number or "Shall I book it?" counts once the service, day and time were heard. A yes from any other turn, a question cut short before its day and time, or a read-back that Gemini did not say (or said with a different time, date or day) means the question is asked again. A tiny turn that is only background sound ("A", "es") does not use up the caller's answer. A move is read back with the new time first ("moved to Friday at 3 PM, from Thursday at 2 PM"), so a yes over the old time counts. When a yes comes too early, Gemini is told to say sorry and read the question once more instead of carrying on.
+- **Confirm before any change:** the first call to a change tool only parks the action and returns a read-back question written by the code. Gemini reads it out. The change happens only when the caller says yes in their answer after hearing that question. A yes spoken over the name, the phone number or "Shall I book it?" counts once the service, day and time were heard. A yes from any other turn, a question cut short before its day and time, or a read-back that Gemini did not say (or said with a different time, date or day) means the question is asked again. A tiny turn that is only background sound ("A", "es") does not use up the caller's answer, and the ways Gemini's transcript writes a yes ("yap", "yah", "yea") all count. Once the caller has heard the whole question for a change, a yes over any repeat of that same question counts at once, so nobody is asked the same thing again and again. When Gemini takes an answer as a yes but the code heard none, Gemini is told plainly that nothing was changed. A move is read back with the new time first ("moved to Friday at 3 PM, from Thursday at 2 PM"), so a yes over the old time counts. When a yes comes too early, Gemini is told to say sorry and read the question once more instead of carrying on.
 - **Consent up front:** a caller who says "just book it, don't ask me to confirm" is not asked again. The change is made at once only when both Gemini says so (`skip_confirmation` in the tool call) and the caller's own words in that turn match one of `SKIP_CONFIRMATION_PATTERNS`. A plain "book it at 2 PM" still gets the read-back, and the result sentence always says what was done.
 - **One connection for speech, thinking and voice:** no speech to text, model and voice hand-offs. Gemini is connected and set up before Start, the next weeks of the calendar are kept in memory, every tool answers Gemini as soon as it is finished, and a confirmed reschedule reads the booking and the new day from Google at the same time.
 - **Filler sentences:** set per kind of tool call in `.env.example`, sized to how long each tool takes, with a recorded fallback for confirmed changes. The log warns when Gemini calls a tool without a filler or says a sentence twice in a row.
@@ -96,7 +98,7 @@ voice-booking-assistant-gemini-live/
   prompts/               System prompt template
   scripts/               check_calendar.py, check_gemini.py and make_fillers.py
   static/                Web page, audio worklets, styles
-  tests/                 145 tests with a fake Gemini server and a fake calendar
+  tests/                 147 tests with a fake Gemini server and a fake calendar
 ```
 
 ## Getting Started
@@ -141,7 +143,8 @@ The settings you are most likely to change (all names and defaults are in `.env.
 | `LIVE_PREFIX_PADDING_MS` | empty | How long speech must last before Gemini counts it as the start of a turn (higher ignores short sounds) |
 | `LIVE_START_SENSITIVITY` / `LIVE_END_SENSITIVITY` | empty | `START_SENSITIVITY_LOW` gives fewer false turns from noise; `END_SENSITIVITY_LOW` gives fewer cut-offs in a pause; empty uses Gemini's default |
 | `LIVE_TRANSCRIPT_WAIT_MS` | `800` | How long a change waits for Gemini's text of your yes |
-| `TOOL_FILLER_SEARCH`, `_LOOKUP`, `_PREPARE`, `_BOOK`, `_RESCHEDULE`, `_CANCEL` | see `.env.example` | Filler sentences per kind of tool call, separated with `\|` |
+| `TOOL_FILLER_SEARCH`, `_LOOKUP`, `_PREPARE`, `_BOOK`, `_RESCHEDULE`, `_CANCEL` | see `.env.example` | Neutral filler sentences, separated with `\|`; Gemini gets them as one list, the book, reschedule and cancel ones are also recorded |
+| `CONFIRM_WORDS` / `REFUSE_WORDS` | see `.env.example` | Words that count as yes (including transcript spellings like "yap") and words that cancel a yes |
 | `FILLER_CLIPS_DIR` | `data/fillers` | Where the recorded fillers are kept (one folder per voice) |
 | `TOOL_RESPONSE_SCHEDULING` | `WHEN_IDLE` | When Gemini should speak about a tool result: `WHEN_IDLE`, `INTERRUPT`, `SILENT`, or empty to send nothing |
 | `READ_BACK_PRESENT_SHARE` / `READ_BACK_MIN_SHARE` | `0.3` / `0.6` | Share of the question's words that marks an answer as the read-back, and that must be said for it to count |
@@ -235,6 +238,13 @@ Both were recorded on 27 October 2026 with the real Gemini Live API (`gemini-3.8
 > **Caller:** Yes, go ahead.<br>
 > **Assistant:** Great, I'm booking that for you now, it will just take a moment. [create_booking: ok] Your Consultation is booked for Thursday 29 October at 11 AM, and your reference number is 348959. Anything else I can help you with?
 
+**A move in one sentence, answered with "yap"** (28 October 2026, same set-up, typed lines):
+
+> **Caller:** I want to move my booking. The reference is 6 1 0 5 0 8 and my phone number is 0300 1234567. Move it to Friday at 3 PM.<br>
+> **Assistant:** Sure, let me see. [reschedule_booking: confirmation required] Just to confirm: you want your Consultation moved to Friday 30 October at 3 PM, from tomorrow at 2 PM. Shall I go ahead?<br>
+> **Caller:** Yap.<br>
+> **Assistant:** [reschedule_booking: ok] Your Consultation has been moved to Friday 30 October at 3 PM. Your booking reference is still 6 1 0, 5 0 8. Is there anything else I can help with?
+
 **Consent given up front** (28 October 2026, same set-up, typed lines):
 
 > **Caller:** Hi, I'd like to book a consultation on Thursday afternoon.<br>
@@ -274,6 +284,15 @@ A later spoken run on 28 October, with the shorter fillers and `WHEN_IDLE` (in-m
 
 In the live test before these changes, the same lookup answer came about 13 s after the filler, and a slot search answer after 3.6 s of silence.
 
+The last spoken run (28 October, neutral fillers, recorded filler after the yes):
+
+| Moment | From the end of the caller's speech |
+|---|---|
+| Filler after the name and phone number | 2.4 s |
+| Read-back question starts | 4.3 s (0.24 s of silence after the filler) |
+| After "Yes, go ahead.": Gemini calls the tool without a filler, the recorded "Okay, just a moment." plays | 1.3 s |
+| Booking result starts | 3.2 s (straight after the recorded filler) |
+
 Other measurements:
 
 - Opening a Gemini session (done when the page loads, not at Start): 1.1 to 1.7 s.
@@ -287,7 +306,7 @@ Other measurements:
 python -m pytest
 ```
 
-The 145 tests need no keys and cost nothing. A local fake Gemini Live server speaks the same JSON protocol as the real one (binary frames, setup, transcripts, tool calls, interruptions, goAway and session resumption), and a fake Google Calendar answers the calendar requests. The tests cover date parsing, slot maths, the booking rules, the confirmation gate, the guardrails, the Gemini client, the latency measurements, the recorded fillers and whole conversations.
+The 147 tests need no keys and cost nothing. A local fake Gemini Live server speaks the same JSON protocol as the real one (binary frames, setup, transcripts, tool calls, interruptions, goAway and session resumption), and a fake Google Calendar answers the calendar requests. The tests cover date parsing, slot maths, the booking rules, the confirmation gate, the guardrails, the Gemini client, the latency measurements, the recorded fillers and whole conversations.
 
 ## Troubleshooting
 

@@ -293,7 +293,7 @@ The 141 tests need no keys and cost nothing. A local fake Gemini Live server spe
 - The output guardrail works on Gemini's transcript, which usually arrives before the same words are played, but not always.
 - The end of your speech in the latency table is estimated from the microphone loudness, because Gemini does not report when it decided you had finished.
 - The Google token is pasted by hand and expires after about an hour. One staff member and one calendar. Locks and the race guard work inside one server process.
-- How quickly Gemini starts speaking after you stop varies from call to call (about 1.1 to 3.5 s in our runs; once 4.9 s). Its own reasoning cannot be turned down on `gemini-3.8-live` (`thinkingLevel` is not supported there).
+- How quickly Gemini starts speaking after you stop varies from call to call (about 1.1 to 3.7 s in our runs; once 4.9 s). Its own reasoning cannot be turned down on `gemini-3.8-live` (`thinkingLevel` is not supported there).
 - `gemini-3.1-flash-live-preview` was tried as a faster model: it accepted the setup and the tools, but it offered times before searching, wrote its own confirmation question and said "your appointment has been cancelled" before the tool had answered, so it is not used.
 - The voice is one of Gemini's prebuilt voices. The app runs in the browser only, with no phone line.
 

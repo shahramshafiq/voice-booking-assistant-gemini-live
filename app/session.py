@@ -721,6 +721,7 @@ class VoiceSession:
             log.info("the confirmation question will be asked again: %s (%.0f%% of its words were said: %r)",
                      how, share * 100, reply.text.strip()[-120:])
             self.memory.pending = None
+            self.memory.question_cut_short = not played_all and not reply.blocked  # the caller answered too early
 
     def _details_heard(self, reply, pending):
         """Was the question played at least up to the end of its service, day and time? Then a yes spoken over the rest

@@ -36,6 +36,7 @@ class SessionMemory:
         self.known_refs = set()  # booking references that really appeared in this conversation
         self.achieved = set()  # tools that really succeeded in this conversation (the output guardrail checks claims against it)
         self.verified_booking = None
+        self.question_cut_short = False  # the caller answered the last question before hearing its day and time
         self.caller_words = []  # [(time, turn, text)]: Gemini's transcript of the caller, piece by piece
 
     # ---------------------------------------------------------------- what the caller said

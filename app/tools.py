@@ -286,10 +286,15 @@ class ToolRunner:
         if not confirmed:
             self.memory.set_pending(plan.key, spec.name, plan.question)
             log.info("%s is waiting for the caller's yes", spec.name)
-            return {"ok": False, "error": "CONFIRMATION_REQUIRED", "say": plan.question,
-                    "message": "STOP. Nothing has been done yet. Do NOT call any tool now. Read the say sentence to the "
-                               "caller out loud, word for word, from its first word to its last. Then wait silently "
-                               "for the caller to answer yes or no."}, False
+            message = ("STOP. Nothing has been done yet. Do NOT call any tool now. Read the say sentence to the caller "
+                       "out loud, word for word, from its first word to its last. Then wait silently for the caller to "
+                       "answer yes or no.")
+            if self.memory.question_cut_short:  # their yes came before they had heard the day and time
+                self.memory.question_cut_short = False
+                message = ("The caller answered before hearing the whole question, so nothing has been changed. Say "
+                           "briefly that you need to read it to them once more, for example 'Sorry, let me just read "
+                           "that back.' " + message)
+            return {"ok": False, "error": "CONFIRMATION_REQUIRED", "say": plan.question, "message": message}, False
         self.memory.pending = None
 
         # From here on the change must finish even if the caller interrupts. The memory is therefore

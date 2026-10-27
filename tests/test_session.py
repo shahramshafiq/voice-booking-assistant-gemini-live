@@ -250,6 +250,7 @@ def test_a_yes_over_the_start_of_the_question_does_not_count():
         assert call.session.memory.pending is None  # the question no longer counts
         again = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
         assert again["response"]["error"] == "CONFIRMATION_REQUIRED" and call.google.events == {}
+        assert again["response"]["message"].startswith("The caller answered before hearing the whole question")
 
     run(scenario)
 
@@ -466,6 +467,7 @@ def test_a_question_queued_behind_another_answer_is_timed_from_its_own_start():
         await until(lambda: call.browser.of_type("clear"))
         again = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
         assert again["response"]["error"] == "CONFIRMATION_REQUIRED" and call.google.events == {}
+        assert again["response"]["message"].startswith("The caller answered before hearing the whole question")
 
     run(scenario)
 
@@ -496,6 +498,7 @@ def test_a_question_gemini_did_not_read_out_is_asked_again():
         await call.gemini.hear(" Yes.")
         again = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
         assert again["response"]["error"] == "CONFIRMATION_REQUIRED" and call.google.events == {}
+        assert "answered before" not in again["response"]["message"]  # it was not an early yes
 
     run(scenario)
 
@@ -507,6 +510,7 @@ def test_a_read_back_with_a_different_time_is_asked_again():
         await call.gemini.hear(" Yes.")
         again = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
         assert again["response"]["error"] == "CONFIRMATION_REQUIRED" and call.google.events == {}
+        assert "answered before" not in again["response"]["message"]  # it was not an early yes
 
     run(scenario)
 

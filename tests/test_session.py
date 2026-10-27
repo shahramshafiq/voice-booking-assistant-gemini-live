@@ -365,6 +365,23 @@ def test_no_recorded_filler_when_gemini_spoke_or_when_nothing_was_confirmed(capl
     assert "Gemini called create_booking without saying a filler sentence first" in caplog.text  # only the first call
 
 
+def test_the_playback_safety_net_waits_while_the_next_answer_is_still_arriving(caplog):
+    async def scenario(call):
+        await call.gemini.say("Let me check the calendar for you.", audio_ms=200)  # the filler...
+        await call.gemini.call_tool("find_available_slots", SLOTS, call_id="c1")
+        await call.gemini.finish()
+        await until(lambda: call.session.awaiting_drain)
+        call.browser.control({"type": "playback_started"})
+        await call.gemini.say("We have 9 AM or 10 AM.", audio_ms=200)  # ...and the result still arriving behind it
+        await asyncio.sleep(1.6)  # longer than the safety net's wait (DRAIN_GRACE_SECONDS is 1 here)
+        assert "never reported the end of playback" not in caplog.text and call.session._playing
+        await call.gemini.finish()
+        await call.played()  # the browser reports the end after both
+        assert call.session.state == "listening"
+
+    run(scenario)
+
+
 def test_a_sentence_said_twice_in_a_row_is_logged(caplog):
     async def scenario(call):
         await call.gemini.say("Alright, one moment.Alright, one moment.")  # a doubled filler

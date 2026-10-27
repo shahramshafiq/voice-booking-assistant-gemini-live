@@ -740,11 +740,19 @@ class VoiceSession:
 
     async def _drain_watchdog(self, wait):
         """Safety net in case the browser never reports that it finished playing."""
-        await asyncio.sleep(wait)
-        async with self._lock:
-            if self._playing and self.awaiting_drain:
+        while True:
+            await asyncio.sleep(wait)
+            async with self._lock:
+                if not (self._playing and self.awaiting_drain):
+                    return
+                if self.reply is not None and self.reply.audio_bytes:
+                    # The next answer (a result after its filler) is still arriving and plays straight on, so the
+                    # browser reports the end only after it: wait for that too.
+                    wait = max(self._queued_ms - self.played_ms, 0) / 1000 + self.settings.drain_grace_seconds
+                    continue
                 log.warning("the browser never reported the end of playback, finishing anyway")
                 await self._finish_playback_nolock()
+                return
 
     def _cancel_drain_watchdog(self):
         task, self._drain_task = self._drain_task, None

@@ -271,8 +271,9 @@ class ToolRunner:
         pending = self.memory.pending
         answering = pending is not None and pending.tool == spec.name and pending.heard_at is not None
         # A caller may give their consent up front ("just book it, don't ask me again"): Gemini says so with
-        # skip_confirmation, and the caller's own words in this turn must say so too.
-        skip = args.skip_confirmation and await self.caller_asked_to_skip(ctx.turn_no)
+        # skip_confirmation, and the caller's own words in this turn must say so too. Only for a first call: an
+        # answer to the question goes through the yes check (and need not wait for words that are not coming).
+        skip = args.skip_confirmation and not answering and await self.caller_asked_to_skip(ctx.turn_no)
         plan = await self.service.prepare(spec.name, args, self.memory.verified_booking, fresh=answering or skip)
         if plan.result is not None:  # an error, or a retry of something already done: nothing to confirm
             return plan.result, False

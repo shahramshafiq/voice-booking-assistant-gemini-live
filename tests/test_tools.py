@@ -166,6 +166,15 @@ def test_up_front_consent_needs_both_gemini_and_the_callers_own_words():
     assert fake.events == {}
 
 
+def test_a_yes_with_the_skip_flag_set_is_not_held_up():
+    fake, _, memory, runner = setup()
+    ask(runner, memory, BOOK)
+    started = time.perf_counter()
+    result = call(runner, "create_booking", dict(BOOK, skip_confirmation=True), turn(memory, "Yes."))
+    assert result["ok"] and len(fake.events) == 1
+    assert time.perf_counter() - started < 0.25  # no wait for a consent phrase after a plain yes
+
+
 def test_a_second_call_that_replaces_the_question_never_crashes_the_first():
     _, _, memory, runner = setup()
     ask(runner, memory, BOOK)

@@ -213,7 +213,10 @@ def test_no_or_unclear_answers_do_not_confirm():
     fake, _, memory, runner = setup()
     for answer in ("No, wait", "hmm let me think", "don't do it", "yes but not tomorrow"):
         ask(runner, memory, BOOK)
-        assert call(runner, "create_booking", BOOK, turn(memory, answer))["error"] == "CONFIRMATION_REQUIRED", answer
+        result = call(runner, "create_booking", BOOK, turn(memory, answer))
+        assert result["error"] == "CONFIRMATION_REQUIRED", answer
+        assert result["message"].startswith("Nothing has been changed, because no clear yes was heard")
+        memory.heard_keys.clear()  # each answer is tried as if the question were new
     assert fake.events == {}
 
 

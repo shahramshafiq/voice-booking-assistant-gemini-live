@@ -295,6 +295,9 @@ class ToolRunner:
                 message = ("The caller answered before hearing the whole question, so nothing has been changed. Say "
                            "briefly that you need to read it to them once more, for example 'Sorry, let me just read "
                            "that back.' " + message)
+            elif answering:  # Gemini took the answer as a yes, the code did not hear one
+                message = ("Nothing has been changed, because no clear yes was heard. Never say that it is done. Ask "
+                           "again by reading the say sentence. " + message)
             return {"ok": False, "error": "CONFIRMATION_REQUIRED", "say": plan.question, "message": message}, False
         self.memory.pending = None
 

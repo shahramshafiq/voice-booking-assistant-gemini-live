@@ -50,7 +50,7 @@ class SessionMemory:
 
     def is_noise(self, text):
         """A caller turn with no real word in it ("A", "es", "hmm"): Gemini heard background sound as speech."""
-        words = re.findall(r"[a-z']+", text.lower().replace("’", "'"))
+        words = re.findall(r"[a-z']+", text.lower().replace("\u2019", "'"))
         if any(word in self._answer_words for word in words):
             return False
         return sum(len(word) for word in words) < self.settings.answer_min_letters

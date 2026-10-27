@@ -21,8 +21,9 @@ def build_instructions(settings, now):
         "SERVICES": services,
         "NOW": f"{now.strftime('%A')} {now.day} {now.strftime('%B %Y')}, {say_time(now)}",
     }
-    for kind, sentences in settings.tool_fillers.items():
-        values[f"FILLER_{kind.upper()}"] = " or ".join(f'"{sentence}"' for sentence in sentences)
+    # every filler of every kind, once each: Gemini picks one before the first tool call of an answer
+    fillers = dict.fromkeys(sentence for sentences in settings.tool_fillers.values() for sentence in sentences)
+    values["FILLERS"] = " or ".join(f'"{sentence}"' for sentence in fillers)
     text = settings.system_prompt_template
     for name, value in values.items():
         text = text.replace("{{" + name + "}}", value)

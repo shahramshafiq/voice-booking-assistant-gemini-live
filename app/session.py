@@ -79,12 +79,12 @@ def _repeated_sentence(text):
     return next((a for a, b in zip(sentences, sentences[1:]) if a == b), None)
 
 
-DETAILS_END = re.compile(r", for |\. (?:Shall I|Is that right)")
+DETAILS_END = re.compile(r", for |, from |\. (?:Shall I|Is that right)")
 
 
 def _details_part(question):
     """The part of the read-back a caller must hear before their yes counts: the service, the day and the time.
-    The name, the phone number and the closing question ("Shall I book it?") may be talked over."""
+    The name, the phone number, the old time of a move and the closing question ("Shall I book it?") may be talked over."""
     match = DETAILS_END.search(question)
     return question[:match.start()] if match else question
 

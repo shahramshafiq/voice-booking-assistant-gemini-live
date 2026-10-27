@@ -20,7 +20,7 @@ from app.config import settings as base_settings
 from app.guardrails.input_rail import InputRail
 from app.guardrails.output_rail import OutputRail
 from app.prompt import build_instructions
-from app.session import VoiceSession, _read_back_differs
+from app.session import VoiceSession, _details_part, _read_back_differs
 from tests.fake_gemini_live import FakeGeminiLive
 from tests.fake_google import FakeGoogleCalendar
 
@@ -524,6 +524,12 @@ def test_the_read_back_check_finds_a_different_time_date_or_day():
     assert not _read_back_differs(move, "move your consultation on Tuesday the 20th of October at 9 AM to Friday the 23rd of "
                                         "October at 3.30 p.m.")
     assert _read_back_differs(move, "move it to Thursday 22 October at 3:30 PM")
+
+
+def test_a_yes_over_the_old_time_of_a_move_counts():
+    question = ("Just to confirm: you want your Consultation moved to Friday 23 October at 3:30 PM, "
+                "from Tuesday 20 October at 9 AM. Shall I go ahead?")
+    assert _details_part(question) == "Just to confirm: you want your Consultation moved to Friday 23 October at 3:30 PM"
 
 
 # ---------------------------------------------------------------------- barge-in

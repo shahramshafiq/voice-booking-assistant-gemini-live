@@ -353,7 +353,8 @@ def test_a_live_reschedule_check_reads_the_booking_and_the_new_day_at_the_same_t
     service.calendar.list_events = slow_list
     args = RescheduleArgs(booking_reference=ref, customer_phone=PHONE, new_date="tomorrow", new_time="11:00")
     plan = run(service.prepare("reschedule_booking", args, fresh=True))
-    assert plan.result is None and "11 AM" in plan.question
+    assert plan.question == ("Just to confirm: you want your Consultation moved to tomorrow at 11 AM, "
+                             "from tomorrow at 9 AM. Shall I go ahead?")  # the new time first
     assert reading["most"] == 2  # both reads were on their way to Google together
 
 

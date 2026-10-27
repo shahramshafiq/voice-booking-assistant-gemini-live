@@ -535,9 +535,12 @@ class BookingService:
             return {"ok": True, **self._booking_dict(moved)}
 
         reference = _private(event)["bookingRef"]
-        about = f"your {known['service']} {known['label']}" if known and known.get("booking_reference") == reference else f"booking {spell_digits(reference)}"
+        service = self.services.get(_private(event).get("serviceId"))
+        what = f"your {service['name']}" if service else f"booking {spell_digits(reference)}"
         key = f"reschedule|{reference}|{_private(event).get('customerPhoneKey')}|{new_start.isoformat()}"
-        question = f"Just to confirm: you want to move {about} to {say_slot(new_start, today)}. Shall I go ahead?"
+        # The new time comes first: a caller who says yes over the old time ("from ...") has heard what matters.
+        question = (f"Just to confirm: you want {what} moved to {say_slot(new_start, today)}, "
+                    f"from {say_slot(old_start, today)}. Shall I go ahead?")
         return Plan(key=key, question=question, apply=self._safe(reschedule_booking))
 
     # ---------------------------------------------------------------- cancel

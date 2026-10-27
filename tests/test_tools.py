@@ -106,7 +106,8 @@ def test_yes_after_hearing_the_question_makes_the_booking():
     ask(runner, memory, BOOK)
     result = call(runner, "create_booking", BOOK, turn(memory, "Yes, please go ahead"))
     assert result["ok"] and len(fake.events) == 1
-    assert "is all set for tomorrow at 9 AM" in result["say"] and "Your booking reference is" in result["say"]
+    reference = " ".join(result["booking_reference"][:3]) + ", " + " ".join(result["booking_reference"][3:])
+    assert "tomorrow at 9 AM" in result["say"] and reference in result["say"]  # read one digit at a time
     assert for_model(result)["say"] == result["say"]  # Gemini reads the code's sentence out
     assert "create_booking" in memory.achieved
     assert memory.pending is None and result["booking_reference"] in memory.known_refs
@@ -275,6 +276,15 @@ def test_a_blocked_turn_runs_no_tool():
     assert result["error"] == "BLOCKED_BY_SAFETY" and SETTINGS.input_block_reply in result["message"]
     assert call(runner, "create_booking", BOOK, ctx)["error"] == "BLOCKED_BY_SAFETY"
     assert fake.requests == [] and memory.pending is None
+
+
+def test_the_result_sentence_is_one_of_several_wordings():
+    _, _, _, runner = setup()
+    result = {"service": "Consultation", "label": "tomorrow at 9 AM", "booking_reference": "123456"}
+    said = {runner.success_reply("create_booking", result) for _ in range(60)}
+    expected = {text.format(service="Consultation", when="tomorrow at 9 AM", reference="1 2 3, 4 5 6")
+                for text in SETTINGS.reply_booked}
+    assert len(SETTINGS.reply_booked) >= 2 and said == expected  # every wording is used, nothing else
 
 
 def test_what_the_model_sees_hides_internal_fields():

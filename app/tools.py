@@ -11,6 +11,7 @@ Gemini never touches the calendar. It asks, and ToolRunner decides:
 import asyncio
 import json
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -141,14 +142,15 @@ class ToolRunner:
         return not self.is_refusal(text) and bool(self._yes and self._yes.search(self._cleaned(text)))
 
     def success_reply(self, tool, result):
-        """The sentence to say after a change has really been made. Written by the code from the real result."""
+        """The sentence to say after a change has really been made. Written by the code from the real result, in one of
+        several wordings so that calls do not all sound the same."""
         if tool == "create_booking":
-            template = self.settings.reply_already_booked if result.get("already_booked") else self.settings.reply_booked
+            templates = self.settings.reply_already_booked if result.get("already_booked") else self.settings.reply_booked
         elif tool == "reschedule_booking":
-            template = self.settings.reply_rescheduled
+            templates = self.settings.reply_rescheduled
         else:
-            template = self.settings.reply_cancelled
-        return template.format(service=result.get("service"), when=result.get("label"),
+            templates = self.settings.reply_cancelled
+        return random.choice(templates).format(service=result.get("service"), when=result.get("label"),
                                reference=spell_digits(str(result.get("booking_reference") or "")))
 
     async def caller_said_yes(self, pending):

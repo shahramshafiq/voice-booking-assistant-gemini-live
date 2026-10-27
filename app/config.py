@@ -112,14 +112,16 @@ class _Reader:
                 self.problems.append(f"{name} has a bad pattern {pattern!r}: {exc}")
         return patterns
 
-    def reply_template(self, name):
-        """A spoken sentence with {service}, {when} and {reference} blanks. Checked now, so a typo shows up at startup."""
-        text = self.text(name)
-        try:
-            text.format(service="x", when="y", reference="z")
-        except (KeyError, IndexError, ValueError) as exc:
-            self.problems.append(f"{name} may only use the blanks {{service}}, {{when}} and {{reference}} ({type(exc).__name__}: {exc})")
-        return text
+    def reply_templates(self, name):
+        """Spoken sentences separated with |, with {service}, {when} and {reference} blanks. One is picked at random
+        each time. Checked now, so a typo shows up at startup."""
+        templates = self.text_list(name, separator="|")
+        for text in templates:
+            try:
+                text.format(service="x", when="y", reference="z")
+            except (KeyError, IndexError, ValueError) as exc:
+                self.problems.append(f"{name} may only use the blanks {{service}}, {{when}} and {{reference}} ({type(exc).__name__}: {exc})")
+        return templates
 
     def file_text(self, name):
         value = self._raw(name)
@@ -219,10 +221,10 @@ class Settings:
     answer_min_letters: int
 
     # what is said when a change has been made
-    reply_booked: str
-    reply_already_booked: str
-    reply_rescheduled: str
-    reply_cancelled: str
+    reply_booked: List[str]  # several wordings, one is picked at random
+    reply_already_booked: List[str]
+    reply_rescheduled: List[str]
+    reply_cancelled: List[str]
 
     # guardrails
     input_max_chars: int
@@ -322,10 +324,10 @@ def load_settings():
         read_back_present_share=r.number("READ_BACK_PRESENT_SHARE"),
         read_back_min_share=r.number("READ_BACK_MIN_SHARE"),
         answer_min_letters=r.integer("ANSWER_MIN_LETTERS"),
-        reply_booked=r.reply_template("REPLY_BOOKED"),
-        reply_already_booked=r.reply_template("REPLY_ALREADY_BOOKED"),
-        reply_rescheduled=r.reply_template("REPLY_RESCHEDULED"),
-        reply_cancelled=r.reply_template("REPLY_CANCELLED"),
+        reply_booked=r.reply_templates("REPLY_BOOKED"),
+        reply_already_booked=r.reply_templates("REPLY_ALREADY_BOOKED"),
+        reply_rescheduled=r.reply_templates("REPLY_RESCHEDULED"),
+        reply_cancelled=r.reply_templates("REPLY_CANCELLED"),
         input_max_chars=r.integer("INPUT_MAX_CHARS"),
         input_block_patterns=r.regex_list("INPUT_BLOCK_PATTERNS"),
         input_block_reply=r.text("INPUT_BLOCK_REPLY"),

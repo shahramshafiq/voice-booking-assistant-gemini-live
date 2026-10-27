@@ -23,7 +23,7 @@ KINDS = ("book", "reschedule", "cancel")
 INSTRUCTIONS = ("You are the voice of a friendly receptionist on a phone call. When you get a sentence, say exactly "
                 "that sentence in a warm, natural way, and nothing else.")
 WAIT_SECONDS = 20
-TRIES = 3
+TRIES = 5
 QUIET = 300  # 16-bit samples quieter than this before the first word and after the last one are cut off
 
 
@@ -60,7 +60,7 @@ async def record(sentence):
     live = GeminiLive(settings, on_message, on_closed)
     await live.connect(INSTRUCTIONS, [])
     try:
-        live.send_note(sentence)
+        live.send_note(f"Say exactly this: {sentence}")
         pcm, said = bytearray(), ""
         deadline = time.monotonic() + WAIT_SECONDS
         while time.monotonic() < deadline:
@@ -87,22 +87,22 @@ async def main():
     folder = clips_folder(settings)
     folder.mkdir(parents=True, exist_ok=True)
     rate = settings.gemini_output_sample_rate
-    index = []
-    for kind in KINDS:
-        for number, sentence in enumerate(settings.tool_fillers[kind], 1):
-            for _ in range(TRIES):
-                pcm, said = await record(sentence)
-                if pcm and said_it(sentence, said):
-                    break
-                print(f"  Gemini said {said!r} instead of {sentence!r}, trying again")
-            else:
-                print(f"SKIPPED: {sentence!r}")
-                continue
-            pcm = trim(pcm, rate)
-            name = f"{kind}_{number}.pcm"
-            (folder / name).write_bytes(pcm)
-            index.append({"kind": kind, "text": sentence, "file": name})
-            print(f"OK: {kind} {sentence!r} ({len(pcm) / (rate * 2):.1f} s)")
+    files = {}  # sentence -> file: a sentence used by several kinds is recorded once
+    for sentence in dict.fromkeys(s for kind in KINDS for s in settings.tool_fillers[kind]):
+        for _ in range(TRIES):
+            pcm, said = await record(sentence)
+            if pcm and said_it(sentence, said):
+                break
+            print(f"  Gemini said {said!r} instead of {sentence!r}, trying again")
+        else:
+            print(f"SKIPPED: {sentence!r}")
+            continue
+        pcm = trim(pcm, rate)
+        files[sentence] = f"filler_{len(files) + 1}.pcm"
+        (folder / files[sentence]).write_bytes(pcm)
+        print(f"OK: {sentence!r} ({len(pcm) / (rate * 2):.1f} s)")
+    index = [{"kind": kind, "text": sentence, "file": files[sentence]}
+             for kind in KINDS for sentence in settings.tool_fillers[kind] if sentence in files]
     for old in folder.glob("*.pcm"):  # recordings of sentences that are no longer in the settings
         if old.name not in {item["file"] for item in index}:
             old.unlink()

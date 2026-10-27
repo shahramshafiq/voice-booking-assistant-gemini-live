@@ -216,6 +216,7 @@ class Settings:
     confirm_ttl_seconds: float
     read_back_present_share: float
     read_back_min_share: float
+    answer_min_letters: int
 
     # what is said when a change has been made
     reply_booked: str
@@ -320,6 +321,7 @@ def load_settings():
         confirm_ttl_seconds=r.number("CONFIRM_TTL_SECONDS"),
         read_back_present_share=r.number("READ_BACK_PRESENT_SHARE"),
         read_back_min_share=r.number("READ_BACK_MIN_SHARE"),
+        answer_min_letters=r.integer("ANSWER_MIN_LETTERS"),
         reply_booked=r.reply_template("REPLY_BOOKED"),
         reply_already_booked=r.reply_template("REPLY_ALREADY_BOOKED"),
         reply_rescheduled=r.reply_template("REPLY_RESCHEDULED"),

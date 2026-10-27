@@ -158,7 +158,8 @@ class ToolRunner:
         while True:
             if self.memory.pending is not pending:
                 return False  # another call replaced or finished the question meanwhile
-            if self.memory.turn_no > pending.answer_turn:
+            answer = self.memory.answer_turn(pending)
+            if answer is not None and self.memory.turn_no > answer:
                 log.info("the caller has said something else since answering the question")
                 return False
             words = self.memory.answer_to(pending)

@@ -7,6 +7,7 @@ for sure. It is written from tool calls and results and from Gemini's transcript
   - the booking references that really appeared and the tools that really succeeded (the output guardrail checks
     the assistant's claims against them), the booking that was looked up, and the wrong tries.
 """
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -21,16 +22,14 @@ class Pending:
     turn_no: int  # the conversation turn in which it was asked
     created: float
     heard_at: Optional[float] = None  # when the caller had heard the whole question; before that a yes cannot count
-    heard_turn: Optional[int] = None  # the caller turn it was heard in; only the NEXT turn can answer it
-
-    @property
-    def answer_turn(self):
-        return None if self.heard_turn is None else self.heard_turn + 1
+    heard_turn: Optional[int] = None  # the caller turn it was heard in; only a LATER turn can answer it
 
 
 class SessionMemory:
     def __init__(self, settings):
         self.settings = settings
+        # yes and no words short enough to look like noise ("ok", "no") still make a turn a real answer
+        self._answer_words = {word for word in settings.confirm_words + settings.refuse_words if " " not in word}
         self.turn_no = 0  # counts the caller's turns
         self.pending = None
         self.verify_failures = 0  # wrong reference/phone attempts in this conversation
@@ -49,10 +48,29 @@ class SessionMemory:
         while self.caller_words and self.caller_words[0][0] < too_old:
             self.caller_words.pop(0)
 
+    def is_noise(self, text):
+        """A caller turn with no real word in it ("A", "es", "hmm"): Gemini heard background sound as speech."""
+        words = re.findall(r"[a-z']+", text.lower().replace("’", "'"))
+        if any(word in self._answer_words for word in words):
+            return False
+        return sum(len(word) for word in words) < self.settings.answer_min_letters
+
+    def answer_turn(self, pending):
+        """The caller turn that answers the question: the first one after hearing it that is not just noise.
+        None while the caller has not answered yet."""
+        if pending.heard_at is None:
+            return None
+        said = {}
+        for at, turn, text in self.caller_words:
+            if turn > pending.heard_turn and at >= pending.heard_at:
+                said[turn] = said.get(turn, "") + text
+        return next((turn for turn in sorted(said) if not self.is_noise(said[turn])), None)
+
     def answer_to(self, pending):
-        """What the caller said in the turn right after hearing the question (and after hearing it)."""
+        """What the caller said in their answer to the question ("" while they have not answered)."""
+        answer = self.answer_turn(pending)
         return "".join(text for at, turn, text in self.caller_words
-                       if turn == pending.answer_turn and at >= pending.heard_at)
+                       if turn == answer and at >= pending.heard_at)
 
     # ---------------------------------------------------------------- the confirmation step
     def set_pending(self, key, tool, question):
@@ -68,11 +86,11 @@ class SessionMemory:
         """True when `key` is the action the caller was asked about, they heard the question, they have not said
         anything else since their answer to it, and it is not too old."""
         p = self.pending
+        if p is None or p.key != key or p.heard_at is None:
+            return False
+        answer = self.answer_turn(p)
         return (
-            p is not None
-            and p.key == key
-            and p.heard_at is not None
-            and self.turn_no <= p.answer_turn
+            (answer is None or self.turn_no <= answer)
             and time.monotonic() - p.created < self.settings.confirm_ttl_seconds
         )
 

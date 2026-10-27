@@ -131,6 +131,23 @@ def test_only_the_answer_right_after_the_question_can_confirm():
     assert later["error"] == "CONFIRMATION_REQUIRED" and fake.events == {}
 
 
+def test_background_noise_heard_as_a_turn_does_not_use_up_the_answer():
+    fake, _, memory, runner = setup()
+    ask(runner, memory, BOOK)
+    turn(memory, "A")  # Gemini heard a sound as speech...
+    turn(memory, " es.")  # ...twice
+    result = call(runner, "create_booking", BOOK, turn(memory, "Yes, go ahead."))  # the real answer still counts
+    assert result["ok"] and len(fake.events) == 1
+
+
+def test_a_short_yes_or_no_is_an_answer_not_noise():
+    _, _, memory, _ = setup()
+    for word in ("ok", "no", "yes", "Yep."):
+        assert not memory.is_noise(word), word
+    for sound in ("A", " es.", "Que?", "hmm", ""):
+        assert memory.is_noise(sound), sound
+
+
 def test_a_second_call_that_replaces_the_question_never_crashes_the_first():
     _, _, memory, runner = setup()
     ask(runner, memory, BOOK)

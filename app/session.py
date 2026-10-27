@@ -147,6 +147,8 @@ class VoiceSession:
         self._spoke_this_turn = False  # Gemini has made a sound since the caller's latest words
         self._bubble_waiting = False  # the page has an empty pair of bubbles for words that have not arrived yet
         self._last_loud = None  # when the microphone last carried speech (perf_counter)
+        self._loud_while_playing = None  # the same while the speakers were playing (it may be their own sound)
+        self._drained_at = None  # when the speakers last finished playing everything (perf_counter)
         self._levels = ([], [])  # microphone loudness of the loud and the quiet pieces in this turn
         self._tool_tasks = {}  # Gemini's call id -> running tool
         self._send_lock = asyncio.Lock()  # one message at a time to the browser
@@ -230,7 +232,11 @@ class VoiceSession:
         samples = array("h", data[:len(data) // 2 * 2])
         level = math.sqrt(sum(x * x for x in samples) / len(samples))
         loud = level >= self.settings.local_speech_rms
-        if loud:
+        if loud and self._queued_ms > 0:
+            # The speakers are playing, and without headphones the microphone hears them. This only counts as the
+            # caller's speech if their words arrive (a barge-in), see _on_caller_words.
+            self._loud_while_playing = time.perf_counter()
+        elif loud:
             self._last_loud = time.perf_counter()
         levels = self._levels[0 if loud else 1]
         if len(levels) < 2000:
@@ -245,7 +251,7 @@ class VoiceSession:
         elif kind == "playback_started":
             await self._on_playback_started()
         elif kind == "playback_progress":
-            self.played_ms = int(message.get("played_ms", 0))
+            await self._on_playback_progress(int(message.get("played_ms", 0)))
         elif kind == "playback_drained":
             async with self._lock:
                 if self._playing and self.awaiting_drain:
@@ -282,7 +288,7 @@ class VoiceSession:
         self._turn_tool_calls = 0
         self._spoke_this_turn = False
         self._bubble_waiting = False
-        self._last_loud = None
+        self._last_loud = self._loud_while_playing = self._drained_at = None
         self._levels = ([], [])
         self.last_activity = time.monotonic()
         await self._set_state("listening")
@@ -497,6 +503,9 @@ class VoiceSession:
     async def _on_caller_words(self, text):
         """A piece of Gemini's transcript of the caller."""
         self.last_activity = time.monotonic()
+        if self._loud_while_playing is not None:  # the caller really was talking over the speakers
+            self._last_loud = max(self._last_loud or 0.0, self._loud_while_playing)
+            self._loud_while_playing = None
         if self._playing and self.reply is None and self.settings.barge_in_enabled and re.search(r"[^\W_]", text):
             # Gemini has finished this answer, so it does not interrupt it: the rest is only in our speakers.
             # This comes before the new turn opens, so the page marks the old answer as interrupted.
@@ -661,6 +670,7 @@ class VoiceSession:
         self._playing = []
         self.awaiting_drain = False
         self._cancel_drain_watchdog()
+        self._drained_at = time.perf_counter()
         if self.reply is not None:
             # an answer still being generated plays on, and the browser starts counting again from zero
             self.reply.offset_ms = -self.reply.audio_ms(self.settings.gemini_output_sample_rate)
@@ -776,17 +786,41 @@ class VoiceSession:
             self.reply.usage = {k: v for k, v in usage.items() if k.endswith("TokenCount")}
 
     # ================================================================ playback reports from the browser
+    def _unreported(self):
+        """Answers with sound whose start of playback has not been reported yet, in the order they play."""
+        return [r for r in [*self._playing, self.reply] if r is not None and r.audio_bytes and not r.reported]
+
     async def _on_playback_started(self):
-        # the first answer with sound that has not been reported yet: the browser starts playing them in order
-        waiting = [r for r in [*self._playing, self.reply] if r is not None and r.audio_bytes and not r.reported]
+        """The speakers were empty and start playing: that is the first answer not reported yet."""
+        waiting = self._unreported()
         if not waiting:
             return
-        reply = waiting[0]
+        started = time.perf_counter()
+        silence = None
+        spoke = waiting[0].timer.marks.get("speech_end")
+        if self._drained_at is not None and (spoke is None or spoke < self._drained_at):
+            # the caller said nothing in between: this answer follows another one (a result after its filler)
+            silence = (started - self._drained_at) * 1000
+        await self._report_latency(waiting[0], started, silence)
+
+    async def _on_playback_progress(self, played_ms):
+        """An answer queued behind another one (a result that arrived while its filler was still playing) gets no
+        "started" from the browser: it starts when the sound ahead of it has been played, with no silence before it."""
+        self.played_ms = played_ms
+        now = time.perf_counter()
+        for reply in self._unreported():
+            if 0 < reply.offset_ms <= played_ms:
+                await self._report_latency(reply, now - (played_ms - reply.offset_ms) / 1000, 0.0)
+
+    async def _report_latency(self, reply, started, silence_ms):
         reply.reported = True
-        reply.timer.mark("audio_played")
+        self._drained_at = None
+        reply.timer.mark("audio_played", at=started)
         metrics = {"type": "metrics", "after_speech": reply.after_speech}
         metrics.update(reply.timer.summary())
         if reply.after_speech:
             metrics["perceived_ms"] = metrics.get("audio_played_ms")
+        if silence_ms is not None:
+            metrics["silence_before_ms"] = round(silence_ms)  # the gap the caller heard after the answer before it
         log.info("reply %d latency: %s", reply.number, {k: v for k, v in metrics.items() if k != "type"})
         await self.send_event(metrics)

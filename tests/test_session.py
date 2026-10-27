@@ -325,6 +325,62 @@ def test_a_yes_over_the_very_end_of_the_question_counts():
     run(scenario)
 
 
+def test_a_result_queued_behind_its_filler_is_reported_when_its_sound_starts():
+    async def scenario(call):
+        await call.speak()
+        await call.gemini.hear(" Do you have anything tomorrow?")
+        await call.gemini.say("Let me check the calendar for you.", audio_ms=2000)  # the filler
+        await call.gemini.call_tool("find_available_slots", SLOTS, call_id="c1")
+        await call.gemini.finish()
+        await until(lambda: call.session.awaiting_drain)
+        call.browser.control({"type": "playback_started"})  # the filler starts playing
+        await call.gemini.say("We have 9 AM or 10 AM.", audio_ms=2000)  # the result arrives while it still plays
+        await call.gemini.finish()
+        await until(lambda: len(call.browser.of_type("metrics")) == 1)
+        call.browser.control({"type": "playback_progress", "played_ms": 2100})  # the player went on into the result
+        await until(lambda: len(call.browser.of_type("metrics")) == 2)
+        filler, result = call.browser.of_type("metrics")
+        assert "silence_before_ms" not in filler  # the first answer to the caller's words
+        assert result["silence_before_ms"] == 0  # no gap: the result followed the filler at once
+
+    run(scenario)
+
+
+def test_the_silence_between_a_filler_and_its_result_is_measured():
+    async def scenario(call):
+        await call.speak()
+        await call.gemini.hear(" Do you have anything tomorrow?")
+        await call.gemini.say("Let me check the calendar for you.", audio_ms=500)
+        await call.gemini.call_tool("find_available_slots", SLOTS, call_id="c1")
+        await call.gemini.finish()
+        await until(lambda: call.session.awaiting_drain)
+        await call.played()  # the filler has played to the end...
+        await asyncio.sleep(0.3)  # ...and the line is quiet
+        await call.gemini.say("We have 9 AM or 10 AM.")
+        await call.gemini.finish()
+        await until(lambda: call.session.awaiting_drain)
+        call.browser.control({"type": "playback_started"})
+        await until(lambda: len(call.browser.of_type("metrics")) == 2)
+        assert 250 <= call.browser.of_type("metrics")[1]["silence_before_ms"] < 1000
+
+    run(scenario)
+
+
+def test_the_speakers_heard_by_the_microphone_are_not_the_callers_speech():
+    async def scenario(call):
+        await call.gemini.say("Let me check the calendar for you.", audio_ms=2000)  # the speakers are playing...
+        await call.gemini.finish()
+        await until(lambda: call.session.awaiting_drain)
+        before = call.session._last_loud
+        call.browser.mic(3000, 5)  # ...and the microphone hears them (no headphones)
+        await until(lambda: call.session._loud_while_playing is not None)
+        assert call.session._last_loud == before  # not taken as the end of the caller's speech
+        await call.gemini.hear(" Sorry, wait.")  # but if the caller really talked over it, it counts
+        await until(lambda: call.session._last_loud != before)
+
+    run(scenario)
+
+
 def test_a_question_queued_behind_another_answer_is_timed_from_its_own_start():
     async def scenario(call):
         await call.gemini.say("One moment.", audio_ms=4000)  # a first answer, still playing...

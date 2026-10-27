@@ -82,6 +82,7 @@ function renderMetrics(m) {
         ["First sound from Gemini", m.first_audio_ms],
         ["Gemini finished making the whole answer", m.generation_complete_ms],
         ["Sound started playing", m.audio_played_ms],
+        ["Silence after the answer before it (for example after a filler)", m.silence_before_ms],
     ];
     metricsEl.innerHTML = "";
     for (const [label, value] of rows) {
@@ -99,7 +100,8 @@ function renderMetrics(m) {
         row.className = "total";
         row.insertCell().textContent = "Total: you stopped talking until you heard sound";
         row.insertCell().textContent = m.perceived_ms + " ms";
-        perceivedHistory.push(m.perceived_ms);
+        // the average is over answers to your words; a result after its filler (it has a silence) is left out
+        if (typeof m.silence_before_ms !== "number") perceivedHistory.push(m.perceived_ms);
         const last = perceivedHistory.slice(-10);
         const mean = Math.round(last.reduce((a, b) => a + b, 0) / last.length);
         averageEl.textContent = "Average of the last " + last.length + " replies: " + mean + " ms";

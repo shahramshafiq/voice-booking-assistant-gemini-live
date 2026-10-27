@@ -44,7 +44,9 @@ Measured against the real Gemini Live API (`gemini-3.8-live`):
 2. The tool runs while the filler is being heard.
 3. Gemini holds its next sentence until the filler has been heard, then starts it a moment later (0.1 to 0.9 s in our runs), if the tool has answered by then.
 
-So a filler should last at least as long as its tool. Searches, lookups and the first call of a change read the copy of the calendar kept in memory (well under 0.1 s), so their fillers are short. After your yes, the change goes to Google (about 1 to 1.5 s), so those fillers are longer. Gemini does not always say the filler: when it makes a confirmed change without one, the server plays a filler recorded in the same voice (`python -m scripts.make_fillers`), so the line is never silent while the calendar is written.
+So a filler should last about as long as its tool plus Gemini's own 0.7 s: a longer one only makes the answer come later, a shorter one leaves a silence. Searches, lookups and the first call of a change read the copy of the calendar kept in memory (well under 0.1 s), so their fillers take about 1 s ("Let me check."). After your yes, the change goes to Google (1.1 to 1.6 s in a live test), so those fillers take about 2 s ("Great, I'm booking that for you now.").
+
+Every tool result is sent with `scheduling: WHEN_IDLE` and, when it worked, a short "give the caller the answer now" nudge. Without them, `gemini-3.8-live` sometimes held a finished result back until the caller spoke again (once for 13 s in a live test). Gemini does not always say the filler: when it makes a confirmed change without one, the server plays a filler recorded in the same voice (`python -m scripts.make_fillers`), so the line is never silent while the calendar is written.
 
 ## Key Features
 
@@ -140,6 +142,7 @@ The settings you are most likely to change (all names and defaults are in `.env.
 | `LIVE_TRANSCRIPT_WAIT_MS` | `800` | How long a change waits for Gemini's text of your yes |
 | `TOOL_FILLER_SEARCH`, `_LOOKUP`, `_PREPARE`, `_BOOK`, `_RESCHEDULE`, `_CANCEL` | see `.env.example` | Filler sentences per kind of tool call, separated with `\|` |
 | `FILLER_CLIPS_DIR` | `data/fillers` | Where the recorded fillers are kept (one folder per voice) |
+| `TOOL_RESPONSE_SCHEDULING` | `WHEN_IDLE` | When Gemini should speak about a tool result: `WHEN_IDLE`, `INTERRUPT`, `SILENT`, or empty to send nothing |
 | `READ_BACK_PRESENT_SHARE` / `READ_BACK_MIN_SHARE` | `0.3` / `0.6` | Share of the question's words that marks an answer as the read-back, and that must be said for it to count |
 | `ANSWER_MIN_LETTERS` | `4` | A turn after the question with fewer letters and no yes or no word is treated as background sound |
 | `REPLY_BOOKED`, `REPLY_RESCHEDULED`, `REPLY_CANCELLED` | see `.env.example` | Result sentences, several wordings separated with `\|`, with `{service}`, `{when}` and `{reference}` |
@@ -202,7 +205,7 @@ The page shows both transcripts, the tools that were used and a latency table fo
 
 ### Example conversations
 
-Both were recorded on 27 October 2026 with the real Gemini Live API (`gemini-3.8-live`, voice `Kore`) and an in-memory test calendar. Tool calls are shown in brackets. Numbers that were read one digit at a time are shown as Gemini's transcript wrote them.
+Both were recorded on 27 October 2026 with the real Gemini Live API (`gemini-3.8-live`, voice `Kore`) and an in-memory test calendar, with the longer filler sentences used that day (they have since been shortened). Tool calls are shown in brackets. Numbers that were read one digit at a time are shown as Gemini's transcript wrote them.
 
 **Book, move and cancel** (the caller's lines were typed into the session):
 
@@ -245,6 +248,17 @@ Measured in the spoken booking above (real Gemini audio, in-memory calendar, so 
 | Filler starts after "Yes, go ahead." | 1.4 s |
 | Booking result starts | 5.6 s (0.06 s of silence after the filler) |
 
+A later spoken run on 28 October, with the shorter fillers and `WHEN_IDLE` (in-memory calendar):
+
+| Moment | From the end of the caller's speech |
+|---|---|
+| Lookup: filler "Let me find that." starts | 1.8 s |
+| Lookup: the booking is read out | 3.4 s (0.1 s of silence after the filler) |
+| Booking after "Yes, go ahead.": filler starts | 1.3 s |
+| Booking result starts | 4.3 s (straight after the filler) |
+
+In the live test before these changes, the same lookup answer came about 13 s after the filler, and a slot search answer after 3.6 s of silence.
+
 Other measurements:
 
 - Opening a Gemini session (done when the page loads, not at Start): 1.1 to 1.7 s.
@@ -279,6 +293,8 @@ The 141 tests need no keys and cost nothing. A local fake Gemini Live server spe
 - The output guardrail works on Gemini's transcript, which usually arrives before the same words are played, but not always.
 - The end of your speech in the latency table is estimated from the microphone loudness, because Gemini does not report when it decided you had finished.
 - The Google token is pasted by hand and expires after about an hour. One staff member and one calendar. Locks and the race guard work inside one server process.
+- How quickly Gemini starts speaking after you stop varies from call to call (about 1.1 to 3.5 s in our runs; once 4.9 s). Its own reasoning cannot be turned down on `gemini-3.8-live` (`thinkingLevel` is not supported there).
+- `gemini-3.1-flash-live-preview` was tried as a faster model: it accepted the setup and the tools, but it offered times before searching, wrote its own confirmation question and said "your appointment has been cancelled" before the tool had answered, so it is not used.
 - The voice is one of Gemini's prebuilt voices. The app runs in the browser only, with no phone line.
 
 ## Author

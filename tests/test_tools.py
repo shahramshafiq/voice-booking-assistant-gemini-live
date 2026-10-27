@@ -191,6 +191,14 @@ def test_a_second_call_that_replaces_the_question_never_crashes_the_first():
     assert first["error"] == second["error"] == "CONFIRMATION_REQUIRED"  # no INTERNAL_ERROR
 
 
+def test_the_ways_a_transcript_writes_yes_all_count():
+    _, _, _, runner = setup()
+    for answer in ("yap", "Yap.", "yah sure", "Yes boss. Yes boss.", "alright", "sounds good", "that's right"):
+        assert runner.is_affirmative(answer), answer
+    for answer in ("nah", "no, wait", "hang on", "hmm let me think"):
+        assert not runner.is_affirmative(answer), answer
+
+
 def test_no_or_unclear_answers_do_not_confirm():
     fake, _, memory, runner = setup()
     for answer in ("No, wait", "hmm let me think", "don't do it", "yes but not tomorrow"):

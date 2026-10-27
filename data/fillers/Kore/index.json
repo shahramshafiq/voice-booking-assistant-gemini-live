@@ -1,47 +1,32 @@
 [
   {
     "kind": "book",
-    "text": "Great, I'm booking that for you now.",
-    "file": "book_1.pcm"
+    "text": "Alright, one moment please.",
+    "file": "filler_1.pcm"
   },
   {
     "kind": "book",
-    "text": "Perfect, I'm getting that booked now.",
-    "file": "book_2.pcm"
-  },
-  {
-    "kind": "book",
-    "text": "Sure, one moment while I book that.",
-    "file": "book_3.pcm"
+    "text": "Okay, just a moment.",
+    "file": "filler_2.pcm"
   },
   {
     "kind": "reschedule",
-    "text": "Great, I'm moving that for you now.",
-    "file": "reschedule_1.pcm"
+    "text": "Alright, one moment please.",
+    "file": "filler_1.pcm"
   },
   {
     "kind": "reschedule",
-    "text": "Sure, one moment while I change the time.",
-    "file": "reschedule_2.pcm"
-  },
-  {
-    "kind": "reschedule",
-    "text": "Perfect, I'm rescheduling that now.",
-    "file": "reschedule_3.pcm"
+    "text": "Okay, just a moment.",
+    "file": "filler_2.pcm"
   },
   {
     "kind": "cancel",
-    "text": "Okay, I'm cancelling that for you now.",
-    "file": "cancel_1.pcm"
+    "text": "Alright, one moment please.",
+    "file": "filler_1.pcm"
   },
   {
     "kind": "cancel",
-    "text": "Sure, one moment while I cancel it.",
-    "file": "cancel_2.pcm"
-  },
-  {
-    "kind": "cancel",
-    "text": "Alright, I'm taking that off the calendar now.",
-    "file": "cancel_3.pcm"
+    "text": "Okay, just a moment.",
+    "file": "filler_2.pcm"
   }
 ]

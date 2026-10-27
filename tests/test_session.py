@@ -144,7 +144,7 @@ def test_the_page_opening_prepares_gemini_with_the_prompt_tools_and_audio_format
         setup = call.gemini.setups[0]["setup"]
         instructions = setup["systemInstruction"]["parts"][0]["text"]
         assert "Now: Monday 19 October 2026, 8 AM (Asia/Karachi)" in instructions and "TrustCare" in instructions
-        assert '"Let me check the calendar for you." or "One moment, I\'m looking at the times."' in instructions
+        assert '"Let me check." or "One moment, let me look."' in instructions  # the search fillers
         assert "{{" not in instructions  # every blank was filled
         names = [tool["name"] for tool in setup["tools"][0]["functionDeclarations"]]
         assert names[:4] == ["get_services", "get_business_config", "check_calendar_availability", "find_available_slots"]

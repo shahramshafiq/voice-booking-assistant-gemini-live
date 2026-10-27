@@ -282,6 +282,6 @@ class ToolRunner:
         if result.get("ok"):
             # The code writes the announcement from the real result, so the numbers are always right.
             result["say"] = self.success_reply(spec.name, result)
-            result["message"] = ("The change is done. Read the say sentence out loud now, word for word, straight "
-                                 "after your filler. Do not say another filler first.")
+            result["message"] = ("The change is done. Read the say sentence out loud now, word for word, with no "
+                                 "filler before it (the caller has already heard one).")
         return result, True

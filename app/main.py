@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from .booking.calendar_client import CalendarClient
 from .booking.service import BookingService
 from .config import settings
+from .fillers import load_clips
 from .guardrails.input_rail import InputRail
 from .guardrails.output_rail import OutputRail
 from .logging_setup import setup_logging
@@ -32,6 +33,7 @@ async def lifespan(app):
     app.state.input_rail = InputRail(settings)
     # the output guardrail protects the rules part of the instructions, which is the same for every conversation
     app.state.output_rail = OutputRail(settings, build_instructions(settings, service.now()))
+    app.state.filler_clips = load_clips(settings)
 
     log.info("ready: Gemini Live model=%s voice=%s calendar=%s", settings.gemini_live_model, settings.gemini_voice,
              settings.google_calendar_id)
@@ -59,6 +61,6 @@ async def voice_socket(websocket: WebSocket):
     await websocket.accept()
     log.info("browser connected")
     state = websocket.app.state
-    session = VoiceSession(websocket, settings, state.service, state.input_rail, state.output_rail)
+    session = VoiceSession(websocket, settings, state.service, state.input_rail, state.output_rail, state.filler_clips)
     await session.run()
     log.info("browser disconnected")

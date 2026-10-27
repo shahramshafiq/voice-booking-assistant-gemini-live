@@ -22,12 +22,14 @@ import base64
 import json
 import logging
 import math
+import random
 import re
 import time
 from array import array
 
 from .booking.calendar_client import CalendarError
 from .booking.speech import tidy_numbers
+from .fillers import KINDS as FILLER_KINDS
 from .live import GeminiLive
 from .memory import SessionMemory
 from .prompt import build_instructions
@@ -123,12 +125,13 @@ class Reply:
 
 
 class VoiceSession:
-    def __init__(self, websocket, settings, service, input_rail, output_rail):
+    def __init__(self, websocket, settings, service, input_rail, output_rail, filler_clips=None):
         self.ws = websocket
         self.settings = settings
         self.service = service
         self.input_rail = input_rail
         self.output_rail = output_rail
+        self.filler_clips = filler_clips or {}  # recorded fillers, played when Gemini makes a change without one
         self.definitions = build_definitions()
         self.live = None  # the Gemini connection; a new one for every conversation
 
@@ -752,8 +755,8 @@ class VoiceSession:
     async def _on_tool_call(self, tool_call):
         reply = await self._answer()
         calls = tool_call.get("functionCalls") or []
-        if not self._spoke_this_turn:
-            log.warning("Gemini called %s without saying a filler sentence first", ", ".join(c.get("name", "?") for c in calls))
+        silent = not self._spoke_this_turn
+        clip = self._recorded_filler(calls) if silent else None  # decided before the tools change the memory
         reply.timer.mark("tools_started")
         await self._set_state("thinking")
         ctx = ToolContext(emit=self.send_event, turn_no=self.memory.turn_no, blocked=self._caller_blocked)
@@ -762,6 +765,28 @@ class VoiceSession:
             too_many = self._turn_tool_calls > self.settings.max_tool_rounds
             # every call answers Gemini as soon as it is finished, so one slow tool never holds up another
             self._tool_tasks[call.get("id")] = asyncio.create_task(self._run_tool(call, ctx, reply, too_many))
+        if silent:
+            names = ", ".join(c.get("name", "?") for c in calls)
+            if clip is None:
+                log.warning("Gemini called %s without saying a filler sentence first", names)
+            else:  # the tools are already running; the recording plays while they work
+                sentence, pcm = clip
+                log.info("Gemini called %s without saying a filler sentence first: playing the recorded %r", names, sentence)
+                await self._on_answer_audio(pcm)
+                await self._on_answer_text(sentence + " ")
+
+    def _recorded_filler(self, calls):
+        """A recorded filler for a change the caller has just said yes to (it goes to Google, so it is the slow call),
+        or None. Never for anything else: a filler before a quick tool only makes its answer come later, and a
+        "booking that now" before the caller has really said yes would be wrong."""
+        pending = self.memory.pending
+        for call in calls:
+            kind = FILLER_KINDS.get(call.get("name"))
+            if (kind and self.filler_clips.get(kind) and pending is not None and pending.tool == call.get("name")
+                    and self.memory.pending_is_confirmable(pending.key)
+                    and self.runner.is_affirmative(self.memory.answer_to(pending))):
+                return random.choice(self.filler_clips[kind])
+        return None
 
     async def _run_tool(self, call, ctx, reply, too_many):
         call_id, name = call.get("id"), call.get("name", "")

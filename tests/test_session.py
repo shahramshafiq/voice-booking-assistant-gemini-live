@@ -325,6 +325,46 @@ def test_a_yes_over_the_very_end_of_the_question_counts():
     run(scenario)
 
 
+CLIP = ("Great, I'm booking that for you now.", b"\x02\x00" * 2400)  # a recorded filler of 100 ms
+
+
+async def asked_and_heard(call):
+    """Gemini asks the read-back question and the caller hears all of it."""
+    asked = await call.gemini.call_tool("create_booking", BOOK, call_id="c1")
+    await call.read_back(asked["response"]["say"])
+
+
+def test_a_change_after_the_yes_with_no_filler_gets_the_recorded_one():
+    async def scenario(call):
+        call.session.filler_clips = {"book": [CLIP]}
+        await asked_and_heard(call)
+        heard_before = len(call.browser.audio)
+        await call.gemini.hear(" Yes, go ahead.")
+        done = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")  # Gemini says nothing first
+        assert done["response"]["ok"] and len(call.google.events) == 1
+        assert bytes(call.browser.audio[heard_before:]) == CLIP[1]  # the recording filled the wait
+        assert call.browser.of_type("assistant_text")[-1]["text"] == CLIP[0]
+        assert "no filler before it" in done["response"]["message"]  # Gemini is told not to say another one
+
+    run(scenario)
+
+
+def test_no_recorded_filler_when_gemini_spoke_or_when_nothing_was_confirmed(caplog):
+    async def scenario(call):
+        call.session.filler_clips = {"book": [CLIP]}
+        before = len(call.browser.audio)
+        asked = await call.gemini.call_tool("create_booking", BOOK, call_id="c1")  # the first call: no yes yet
+        assert asked["response"]["error"] == "CONFIRMATION_REQUIRED" and len(call.browser.audio) == before
+        await call.read_back(asked["response"]["say"])
+        await call.gemini.hear(" Yes, go ahead.")
+        await call.gemini.say("Perfect, I'm getting that booked for you right now.", audio_ms=100)  # Gemini's own filler
+        done = await call.gemini.call_tool("create_booking", BOOK, call_id="c2")
+        assert done["response"]["ok"] and 2 not in call.browser.audio  # the recording (bytes of 2) was never played
+
+    run(scenario)
+    assert "Gemini called create_booking without saying a filler sentence first" in caplog.text  # only the first call
+
+
 def test_a_sentence_said_twice_in_a_row_is_logged(caplog):
     async def scenario(call):
         await call.gemini.say("Alright, one moment.Alright, one moment.")  # a doubled filler

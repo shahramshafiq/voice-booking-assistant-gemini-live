@@ -8,7 +8,7 @@ A voice receptionist that books, looks up, moves and cancels appointments in Goo
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![Gemini Live](https://img.shields.io/badge/Gemini%20Live-gemini--3.8--live-8E75B2?style=flat-square&logo=googlegemini&logoColor=white)
 ![Google Calendar](https://img.shields.io/badge/Google%20Calendar-API%20v3-4285F4?style=flat-square&logo=googlecalendar&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-125%20passing-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-141%20passing-brightgreen?style=flat-square)
 
 </div>
 
@@ -36,18 +36,29 @@ browser speakers (24 kHz PCM), transcripts, tool list, latency table
 3. When Gemini asks for a tool, the backend checks the input, runs the booking rules against the calendar and answers with the result.
 4. Gemini's sound is passed to the browser as it arrives. Its transcript of its own words is checked by the output guardrail on the way.
 
+### What a tool call sounds like
+
+Measured against the real Gemini Live API (`gemini-3.8-live`):
+
+1. You stop talking. Gemini waits for 700 ms of silence (`LIVE_SILENCE_DURATION_MS`), then starts a short filler sentence ("Let me check the calendar for you.") and sends the tool call almost at the same time.
+2. The tool runs while the filler is being heard.
+3. Gemini holds its next sentence until the filler has been heard, then starts it a moment later (0.1 to 0.9 s in our runs), if the tool has answered by then.
+
+So a filler should last at least as long as its tool. Searches, lookups and the first call of a change read the copy of the calendar kept in memory (well under 0.1 s), so their fillers are short. After your yes, the change goes to Google (about 1 to 1.5 s), so those fillers are longer. Gemini does not always say the filler: when it makes a confirmed change without one, the server plays a filler recorded in the same voice (`python -m scripts.make_fillers`), so the line is never silent while the calendar is written.
+
 ## Key Features
 
 - **Eight booking tools:** services, business config, calendar availability, slot search, create, look up, reschedule and cancel. All rules (opening hours, breaks, buffers, notice, durations, cancellation policy) live in backend code and `.env`, never in the model.
-- **Confirm before any change:** the first call to a change tool only parks the action and returns a read-back question written by the code. Gemini reads it out. The change happens only when the caller says yes in their first answer after hearing that question. A yes spoken over the name, the phone number or "Shall I book it?" counts once the service, day and time were heard. A yes from any other turn, a question cut short before its day and time, or a read-back that Gemini did not say (or said with a different time, date or day) means the question is asked again.
-- **One connection for speech, thinking and voice:** no speech to text, model and voice hand-offs. Gemini is connected and set up before Start, the next weeks of the calendar are kept in memory, and every tool answers Gemini as soon as it is finished.
-- **Filler sentences:** the prompt tells Gemini to say a short filler before every tool call ("Let me check the calendar for you.", "Great, I'm booking that for you now."), set per kind of tool in `.env.example`, so the line is never silent while a tool works.
+- **Confirm before any change:** the first call to a change tool only parks the action and returns a read-back question written by the code. Gemini reads it out. The change happens only when the caller says yes in their answer after hearing that question. A yes spoken over the name, the phone number or "Shall I book it?" counts once the service, day and time were heard. A yes from any other turn, a question cut short before its day and time, or a read-back that Gemini did not say (or said with a different time, date or day) means the question is asked again. A tiny turn that is only background sound ("A", "es") does not use up the caller's answer.
+- **One connection for speech, thinking and voice:** no speech to text, model and voice hand-offs. Gemini is connected and set up before Start, the next weeks of the calendar are kept in memory, every tool answers Gemini as soon as it is finished, and a confirmed reschedule reads the booking and the new day from Google at the same time.
+- **Filler sentences:** set per kind of tool call in `.env.example`, sized to how long each tool takes, with a recorded fallback for confirmed changes. The log warns when Gemini calls a tool without a filler or says a sentence twice in a row.
+- **Varied answers:** each result sentence (booked, moved, cancelled) has several wordings, picked at random and always filled from the real calendar result.
 - **Barge-in:** Gemini stops when you talk over it. Gemini makes sound faster than it is played, so when you talk over the end of an answer that is still playing, the server stops the speakers itself.
 - **Safe against retries and races:** a repeated request returns the existing booking, a lost reply is checked before reporting failure, a reschedule updates the same calendar event, and two callers cannot take one slot.
 - **Identity checks:** lookup, reschedule and cancel need the booking reference and the phone number, and wrong tries are limited per call and per phone number.
 - **Input and output guardrails:** the input guardrail reads Gemini's transcript of the caller. In a turn that tries to override the rules, no tool runs at all, and card numbers are kept off the page and out of the logs. The output guardrail reads Gemini's transcript of its own answer and stops secrets, instruction leaks and "booked it" claims that no tool confirmed. A stopped answer is silenced and Gemini is told to say a fixed sentence instead.
 - **Fresh memory per call:** every conversation gets its own Gemini session and an empty short-term memory. Long calls continue on a new connection with Gemini's session resumption when the old one is about to close.
-- **Latency table:** each answer is timed from your last word (estimated from the microphone loudness) to the first sound you hear, with the tool time and Gemini's first sound in between.
+- **Latency table:** each answer is timed from your last word to the first sound you hear, with the stages in between. For an answer that follows another one (a result after its filler) the silence between the two is shown too.
 
 ## Tech Stack
 
@@ -69,18 +80,20 @@ voice-booking-assistant-gemini-live/
     main.py              FastAPI app, page, health check and the voice WebSocket
     config.py            Reads and validates every setting from .env
     live.py              Gemini Live client: setup, audio, tool answers, reconnect
-    session.py           One browser call: Gemini messages, tools, barge-in, guardrails
+    session.py           One browser call: Gemini messages, tools, barge-in, guardrails, latency
     prompt.py            Builds the instructions for each conversation
     tools.py             Tool list, input checks and the confirmation gate
     memory.py            Short-term memory for one call
+    fillers.py           Loads the recorded filler sentences
     timing.py            Per-answer latency stopwatch
     booking/             Scheduling rules and the eight tools
     guardrails/          Input and output guardrails
   data/services.json     The services offered
+  data/fillers/          Filler sentences recorded in the Gemini voice (one folder per voice)
   prompts/               System prompt template
-  scripts/               check_calendar.py and check_gemini.py
+  scripts/               check_calendar.py, check_gemini.py and make_fillers.py
   static/                Web page, audio worklets, styles
-  tests/                 125 tests with a fake Gemini server and a fake calendar
+  tests/                 141 tests with a fake Gemini server and a fake calendar
 ```
 
 ## Getting Started
@@ -90,7 +103,7 @@ voice-booking-assistant-gemini-live/
 - Python 3.14
 - A Gemini API key from [Google AI Studio](https://aistudio.google.com/)
 - A Google Calendar (a separate test calendar is recommended) and its Calendar ID
-- A modern desktop browser and a microphone (headphones recommended)
+- A modern desktop browser and a microphone (headphones recommended: without them the microphone hears the assistant)
 
 ### Installation
 
@@ -120,12 +133,16 @@ The settings you are most likely to change (all names and defaults are in `.env.
 |---|---|---|
 | `GEMINI_API_KEY` | (yours) | Gemini API key |
 | `GEMINI_LIVE_MODEL` | `gemini-3.8-live` | The Live model |
-| `GEMINI_VOICE` | `Kore` | A prebuilt Gemini voice |
-| `LIVE_SILENCE_DURATION_MS` | `500` | How long you must be quiet before your turn ends (lower answers sooner, higher cuts you off less) |
-| `LIVE_START_SENSITIVITY` / `LIVE_END_SENSITIVITY` | empty | Gemini's speech detection sensitivity (empty = Gemini's default) |
+| `GEMINI_VOICE` | `Kore` | A prebuilt Gemini voice (record the fillers again after changing it) |
+| `LIVE_SILENCE_DURATION_MS` | `700` | How long you must be quiet before your turn ends (lower answers sooner, higher cuts you off less) |
+| `LIVE_PREFIX_PADDING_MS` | empty | How long speech must last before Gemini counts it as the start of a turn (higher ignores short sounds) |
+| `LIVE_START_SENSITIVITY` / `LIVE_END_SENSITIVITY` | empty | `START_SENSITIVITY_LOW` gives fewer false turns from noise; `END_SENSITIVITY_LOW` gives fewer cut-offs in a pause; empty uses Gemini's default |
 | `LIVE_TRANSCRIPT_WAIT_MS` | `800` | How long a change waits for Gemini's text of your yes |
-| `READ_BACK_MIN_SHARE` | `0.6` | Share of the read-back question's words Gemini must say for a yes to count |
-| `CONFIRM_HEARD_SHARE` | `0.85` | Share of the question you must have heard if you talk over its end |
+| `TOOL_FILLER_SEARCH`, `_LOOKUP`, `_PREPARE`, `_BOOK`, `_RESCHEDULE`, `_CANCEL` | see `.env.example` | Filler sentences per kind of tool call, separated with `\|` |
+| `FILLER_CLIPS_DIR` | `data/fillers` | Where the recorded fillers are kept (one folder per voice) |
+| `READ_BACK_PRESENT_SHARE` / `READ_BACK_MIN_SHARE` | `0.3` / `0.6` | Share of the question's words that marks an answer as the read-back, and that must be said for it to count |
+| `ANSWER_MIN_LETTERS` | `4` | A turn after the question with fewer letters and no yes or no word is treated as background sound |
+| `REPLY_BOOKED`, `REPLY_RESCHEDULED`, `REPLY_CANCELLED` | see `.env.example` | Result sentences, several wordings separated with `\|`, with `{service}`, `{when}` and `{reference}` |
 | `GOOGLE_CALENDAR_ID` | (yours) | The one calendar the assistant books into |
 | `GOOGLE_CALENDAR_API_TOKEN` | (yours) | Manually pasted access token, about one hour long |
 | `BUSINESS_NAME` / `BUSINESS_STAFF_NAME` | `TrustCare` / `Shahram Shafiq` | The business and the one staff member all appointments are with |
@@ -158,6 +175,12 @@ python -m scripts.check_gemini --speak --tool
 
 `check_calendar` checks the token and the calendar (free). `check_gemini` opens the real Gemini setup with the instructions, the eight tools and the voice, which generates nothing. With `--speak` it times one short spoken sentence, and with `--tool` it asks a question that needs a tool and answers the tool with made-up times (the calendar is not used).
 
+The recorded fillers for the `Kore` voice are included. After changing `GEMINI_VOICE` or the book, reschedule or cancel fillers, record them again (a small cost, a few seconds of speech each):
+
+```bash
+python -m scripts.make_fillers
+```
+
 ### Run
 
 ```bash
@@ -177,17 +200,81 @@ Try a full conversation:
 
 The page shows both transcripts, the tools that were used and a latency table for every answer.
 
+### Example conversations
+
+Both were recorded on 27 October 2026 with the real Gemini Live API (`gemini-3.8-live`, voice `Kore`) and an in-memory test calendar. Tool calls are shown in brackets. Numbers that were read one digit at a time are shown as Gemini's transcript wrote them.
+
+**Book, move and cancel** (the caller's lines were typed into the session):
+
+> **Caller:** Hi, I'd like to book a consultation on Thursday afternoon.<br>
+> **Assistant:** Let me check the calendar for you. [find_available_slots] We have openings on Thursday at 2 PM, 2:30 PM, and 3 PM. Which time works best for you?<br>
+> **Caller:** The first time please. My name is Ali Raza and my number is 0300 1234567.<br>
+> **Assistant:** Alright, one moment. [create_booking: confirmation required] Just to confirm: a Consultation Thursday 29 October at 2 PM, for Ali Raza, phone number 0 3 0 0, 1 2 3, 4 5 6 7. Shall I book it?<br>
+> **Caller:** Yes, go ahead.<br>
+> **Assistant:** Great, I'm booking that for you now, it will just take a moment. [create_booking: ok] That's confirmed: your Consultation for Thursday 29 October at 2 PM. Please keep your booking reference, 0 1 3, 4 0 2. Is there anything else you need?<br>
+> **Caller:** Thanks. Actually, can you move that booking to Friday at 3 PM? The reference is 0 1 3 4 0 2 and my number is 0300 1234567.<br>
+> **Assistant:** Let me check the calendar for you. [find_available_slots] Alright, one moment. [reschedule_booking: confirmation required] Just to confirm: you want to move your Consultation Thursday 29 October at 2 PM to Friday 30 October at 3 PM. Shall I go ahead?<br>
+> **Caller:** Yes, please.<br>
+> **Assistant:** Great, I'm moving that for you now, it will just take a moment. [reschedule_booking: ok] Your Consultation has been moved to Friday 30 October at 3 PM. Your booking reference is still 0 1 3, 4 0 2. Is there anything else I can help with?<br>
+> **Caller:** Sorry, I've changed my mind. Please cancel it.<br>
+> **Assistant:** Alright, let me cancel that appointment for you right now. [cancel_booking: confirmation required] Just to confirm: you want to cancel your Consultation Friday 30 October at 3 PM. Is that right?<br>
+> **Caller:** Yes.<br>
+> **Assistant:** Okay, I'm cancelling that for you now, just a moment. [cancel_booking: ok] Your Consultation for Friday 30 October at 3 PM has been cancelled. Is there anything else I can help with?
+
+**A spoken booking** (the caller's lines were spoken and sent as microphone audio in real time):
+
+> **Caller:** Hi, I'd like to book a consultation on Thursday at eleven in the morning.<br>
+> **Assistant:** Let me check the calendar for you. [find_available_slots] That time is available. May I please have your name and phone number?<br>
+> **Caller:** My name is Ali Raza, and my number is zero three zero zero, one two three four five six seven.<br>
+> **Assistant:** Alright, one moment. [create_booking: confirmation required] Just to confirm: a Consultation Thursday 29 October at 11 AM, for Ali Raza, phone number 0300 1234567. Shall I book it?<br>
+> **Caller:** Yes, go ahead.<br>
+> **Assistant:** Great, I'm booking that for you now, it will just take a moment. [create_booking: ok] Your Consultation is booked for Thursday 29 October at 11 AM, and your reference number is 348959. Anything else I can help you with?
+
+## Latency
+
+How it is measured: the end of your speech is estimated from the microphone loudness (Gemini does not report when it decided you had finished), and only while the speakers are quiet, so their own sound coming back into the microphone does not count. Each answer is timed to the moment the browser starts playing it.
+
+Measured in the spoken booking above (real Gemini audio, in-memory calendar, so the calendar writes took a few milliseconds instead of the 1 to 1.5 s of Google):
+
+| Moment | From the end of the caller's speech |
+|---|---|
+| Filler starts after "I'd like to book ..." | 1.9 s |
+| Answer with the free time starts | 4.3 s (straight after the filler, 0 s of silence) |
+| Filler starts after the name and phone number | 3.3 s |
+| Read-back question starts | 5.4 s (0.23 s of silence after the filler) |
+| Filler starts after "Yes, go ahead." | 1.4 s |
+| Booking result starts | 5.6 s (0.06 s of silence after the filler) |
+
+Other measurements:
+
+- Opening a Gemini session (done when the page loads, not at Start): 1.1 to 1.7 s.
+- `check_gemini --speak`: first sound 1.1 s after the question was sent. `check_gemini --tool`: tool call after 1.0 s, first sound 0.8 s after the tool answer.
+- In typed runs, the silence between a filler and the next sentence was 0.3 to 0.9 s when the tool answered in time. Once, after Gemini picked a filler meant for after the yes ("let me cancel that appointment for you right now") before the question, it paused about 6 s before reading the question; the prompt now names the first call and the call after the yes separately.
+- Early live tests had up to 9.4 s of silence after "I'm booking that for you now", before the result sentence was given to Gemini inside the tool result with a nudge to read it at once.
+
 ## Testing
 
 ```bash
 python -m pytest
 ```
 
-The 125 tests need no keys and cost nothing. A local fake Gemini Live server speaks the same JSON protocol as the real one (binary frames, setup, transcripts, tool calls, interruptions, goAway and session resumption), and a fake Google Calendar answers the calendar requests. The tests cover date parsing, slot maths, the booking rules, the confirmation gate, the guardrails, the Gemini client and whole conversations.
+The 141 tests need no keys and cost nothing. A local fake Gemini Live server speaks the same JSON protocol as the real one (binary frames, setup, transcripts, tool calls, interruptions, goAway and session resumption), and a fake Google Calendar answers the calendar requests. The tests cover date parsing, slot maths, the booking rules, the confirmation gate, the guardrails, the Gemini client, the latency measurements, the recorded fillers and whole conversations.
+
+## Troubleshooting
+
+| What you see | Why | What to do |
+|---|---|---|
+| "Calendar problem: The Google Calendar token is expired or invalid." | The pasted token lasts about one hour | Get a new token, paste it in `.env`, restart |
+| "Could not connect to Gemini" | Wrong key, no network or no quota | Run `python -m scripts.check_gemini`: it prints Gemini's own reason |
+| The assistant keeps stopping in the middle | The microphone hears the speakers | Use headphones, or set `BARGE_IN_ENABLED=false` |
+| You are cut off in a pause | The end of turn comes after 700 ms of silence | Say each request in one breath, or try `LIVE_END_SENSITIVITY=END_SENSITIVITY_LOW` |
+| Tiny turns like "A" or "es" appear | Background sound was taken as speech | Try `LIVE_START_SENSITIVITY=START_SENSITIVITY_LOW` or `LIVE_PREFIX_PADDING_MS=150` |
+| Log: "Gemini called ... without saying a filler sentence first" | Gemini skipped the filler | For a confirmed change the recorded filler is played; for other tools the answer simply comes without one |
 
 ## Limitations and Roadmap
 
 - Gemini hears the audio itself, so the input guardrail cannot hide a request from the model. It stops every tool in that turn instead, and the output guardrail checks what is said.
+- The fillers and the way the result follows them are asked for in the prompt, which Gemini usually but not always follows. The recorded filler covers only confirmed changes, because a filler before a quick tool would only make its answer come later.
 - Gemini reads the confirmation question out itself, so its transcript is compared with the code's question. A paraphrase that drops too many of its words is asked again.
 - The output guardrail works on Gemini's transcript, which usually arrives before the same words are played, but not always.
 - The end of your speech in the latency table is estimated from the microphone loudness, because Gemini does not report when it decided you had finished.

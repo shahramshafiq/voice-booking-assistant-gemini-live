@@ -337,6 +337,26 @@ def test_wrong_tries_lock_one_phone_number_for_everyone():
     assert other["error"] == "BOOKING_NOT_FOUND"  # another number is not locked
 
 
+def test_a_live_reschedule_check_reads_the_booking_and_the_new_day_at_the_same_time():
+    fake, service = make()
+    ref = book(service, first_slot(service))["booking_reference"]
+    real_list = service.calendar.list_events
+    reading = {"now": 0, "most": 0}
+
+    async def slow_list(*args, **kwargs):  # every trip to Google takes 0.2 s
+        reading["now"] += 1
+        reading["most"] = max(reading["most"], reading["now"])
+        await asyncio.sleep(0.2)
+        reading["now"] -= 1
+        return await real_list(*args, **kwargs)
+
+    service.calendar.list_events = slow_list
+    args = RescheduleArgs(booking_reference=ref, customer_phone=PHONE, new_date="tomorrow", new_time="11:00")
+    plan = run(service.prepare("reschedule_booking", args, fresh=True))
+    assert plan.result is None and "11 AM" in plan.question
+    assert reading["most"] == 2  # both reads were on their way to Google together
+
+
 def test_a_reschedule_whose_answer_was_lost_is_not_reported_as_unchanged():
     fake, service = make()
     ref = book(service, first_slot(service))["booking_reference"]

@@ -473,7 +473,18 @@ class BookingService:
             raise BookingError("INVALID_INPUT", str(exc))
 
     async def _prepare_reschedule_booking(self, args, known, fresh):
-        event = await self._find_booking(args.booking_reference, args.customer_phone, fresh=fresh)
+        day = self._parse_date_or_error(args.new_date)
+        # The booking and the new day are read at the same time: after the caller's yes (fresh=True) each one is a
+        # trip to Google, and the caller is waiting.
+        read_at = time_module.monotonic()
+        event, events = await asyncio.gather(
+            self._find_booking(args.booking_reference, args.customer_phone, fresh=fresh),
+            self._day_events(day, fresh=fresh),
+            return_exceptions=True,
+        )
+        for outcome in (event, events):
+            if isinstance(outcome, BaseException):
+                raise outcome
         old_start, old_end = event_bounds(event, self.tz)
         if old_start < self.now():
             raise BookingError("PAST_BOOKING", "That appointment has already taken place.")
@@ -481,7 +492,6 @@ class BookingService:
         notice = self._notice(self.services.get(_private(event).get("serviceId")))
         today = self.now().date()
 
-        day = self._parse_date_or_error(args.new_date)
         try:
             new_start = datetime.combine(day, parse_clock(args.new_time), tzinfo=self.tz)
         except ValueError:
@@ -496,8 +506,6 @@ class BookingService:
         if new_start == old_start:
             raise BookingError("NO_CHANGE", "The appointment is already at that time.")
 
-        read_at = time_module.monotonic()
-        events = await self._day_events(day, fresh=fresh)
         problem = slot_problem(new_start, new_end, busy_intervals(events, self.rules, event["id"]), self.rules, self.now(), notice)
         if problem:
             raise await self._unavailable(problem, new_start, duration, notice, events, exclude_id=event["id"])

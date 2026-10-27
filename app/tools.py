@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from .booking.calendar_client import CalendarError
 from .booking.models import (
-    BookingLookupArgs, CheckAvailabilityArgs, CreateBookingArgs, FindSlotsArgs, NoArgs, RescheduleArgs,
+    BookingLookupArgs, CancelArgs, CheckAvailabilityArgs, CreateBookingArgs, FindSlotsArgs, NoArgs, RescheduleArgs,
 )
 from .booking.service import BookingError
 from .booking.speech import spell_digits
@@ -48,17 +48,20 @@ TOOLS = {spec.name: spec for spec in [
              "Book an appointment. Call it as soon as you have the service, the time, the name and the phone number, "
              "without asking the caller first. The result's say field is the confirmation question: read it out loud "
              "word for word and wait for the answer. Do NOT call any tool until the caller answers. After the yes, "
-             "call it again with the same details.", write=True),
+             "call it again with the same details. If the caller clearly said not to ask them to confirm, set "
+             "skip_confirmation to true.", write=True),
     ToolSpec("get_booking", BookingLookupArgs, "Look up a booking by reference and phone number."),
     ToolSpec("reschedule_booking", RescheduleArgs,
              "Move a booking to a new day and time. Call it as soon as you have the new time, without asking the caller "
              "first. Read the say field of the result out loud word for word and wait for the answer. Do NOT call any "
-             "tool until the caller answers. After the yes, call it again with the same details.",
+             "tool until the caller answers. After the yes, call it again with the same details. If the caller clearly "
+             "said not to ask them to confirm, set skip_confirmation to true.",
              write=True),
-    ToolSpec("cancel_booking", BookingLookupArgs,
+    ToolSpec("cancel_booking", CancelArgs,
              "Cancel a booking. Call it as soon as the caller asks to cancel, without asking them first. Read the say "
              "field of the result out loud word for word and wait for the answer. Do NOT call any tool until the "
-             "caller answers. After the yes, call it again with the same details.", write=True),
+             "caller answers. After the yes, call it again with the same details. If the caller clearly said not to "
+             "ask them to confirm, set skip_confirmation to true.", write=True),
 ]}
 
 NEEDS_VERIFICATION = {"get_booking", "reschedule_booking", "cancel_booking"}
@@ -126,6 +129,7 @@ class ToolRunner:
         self.definitions = build_definitions()
         self._yes = _word_pattern(settings.confirm_words)
         self._no = _word_pattern(settings.refuse_words)
+        self._skip = [re.compile(pattern, re.IGNORECASE) for pattern in settings.skip_confirmation_patterns]
 
     @staticmethod
     def is_write(name):
@@ -169,6 +173,20 @@ class ToolRunner:
                 return True
             if self.is_refusal(words) or time.monotonic() >= deadline:
                 log.info("no yes from the caller after the question (heard %r)", words.strip())
+                return False
+            await asyncio.sleep(0.05)
+
+    async def caller_asked_to_skip(self, turn_no):
+        """Did the caller themselves say, in this turn, to go ahead without being asked (SKIP_CONFIRMATION_PATTERNS)?
+        Gemini claims it with skip_confirmation; this checks the caller's own words, waiting a moment for their text."""
+        deadline = time.monotonic() + self.settings.live_transcript_wait_ms / 1000
+        while True:
+            words = "".join(text for _, turn, text in self.memory.caller_words if turn == turn_no)
+            words = words.lower().replace(chr(0x2019), "'")
+            if any(pattern.search(words) for pattern in self._skip):
+                return True
+            if time.monotonic() >= deadline:
+                log.info("Gemini asked to skip the confirmation, but the caller did not say so (heard %r)", words.strip())
                 return False
             await asyncio.sleep(0.05)
 
@@ -252,14 +270,19 @@ class ToolRunner:
         # against the in-memory calendar window; the check right before the real change always asks Google.
         pending = self.memory.pending
         answering = pending is not None and pending.tool == spec.name and pending.heard_at is not None
-        plan = await self.service.prepare(spec.name, args, self.memory.verified_booking, fresh=answering)
+        # A caller may give their consent up front ("just book it, don't ask me again"): Gemini says so with
+        # skip_confirmation, and the caller's own words in this turn must say so too.
+        skip = args.skip_confirmation and await self.caller_asked_to_skip(ctx.turn_no)
+        plan = await self.service.prepare(spec.name, args, self.memory.verified_booking, fresh=answering or skip)
         if plan.result is not None:  # an error, or a retry of something already done: nothing to confirm
             return plan.result, False
 
         # Step 2: the real change needs a yes to exactly this action, said in the caller's answer to the question
-        # (their first words after hearing it). A yes from any other turn never counts.
+        # (their first words after hearing it), or the consent given up front. A yes from any other turn never counts.
         pending = self.memory.pending
-        confirmed = self.memory.pending_is_confirmable(plan.key) and await self.caller_said_yes(pending)
+        confirmed = skip or (self.memory.pending_is_confirmable(plan.key) and await self.caller_said_yes(pending))
+        if skip:
+            log.info("the caller asked not to be asked to confirm, so %s is made at once", spec.name)
         if not confirmed:
             self.memory.set_pending(plan.key, spec.name, plan.question)
             log.info("%s is waiting for the caller's yes", spec.name)

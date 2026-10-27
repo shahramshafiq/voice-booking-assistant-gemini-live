@@ -149,6 +149,23 @@ def test_a_short_yes_or_no_is_an_answer_not_noise():
         assert memory.is_noise(sound), sound
 
 
+def test_consent_given_up_front_makes_the_change_at_once():
+    fake, _, memory, runner = setup()
+    ctx = turn(memory, "The 9 AM is fine. Just book it, don't ask me to confirm.")
+    result = call(runner, "create_booking", dict(BOOK, skip_confirmation=True), ctx)
+    assert result["ok"] and len(fake.events) == 1 and "tomorrow at 9 AM" in result["say"]
+    assert memory.pending is None
+
+
+def test_up_front_consent_needs_both_gemini_and_the_callers_own_words():
+    fake, _, memory, runner = setup()
+    claimed = call(runner, "create_booking", dict(BOOK, skip_confirmation=True), turn(memory, "9 AM please"))
+    assert claimed["error"] == "CONFIRMATION_REQUIRED"  # Gemini said so, the caller did not
+    said = call(runner, "create_booking", BOOK, turn(memory, "Just book it, no need to confirm."))
+    assert said["error"] == "CONFIRMATION_REQUIRED"  # the caller said so, Gemini did not set it
+    assert fake.events == {}
+
+
 def test_a_second_call_that_replaces_the_question_never_crashes_the_first():
     _, _, memory, runner = setup()
     ask(runner, memory, BOOK)

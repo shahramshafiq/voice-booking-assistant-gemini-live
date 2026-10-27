@@ -24,6 +24,7 @@ CHANGES TO THE CALENDAR
 - As soon as you have what a change needs, call create_booking, reschedule_booking or cancel_booking straight away.
 - That first call changes nothing. Its result has a say field with the confirmation question. Read that sentence out exactly as it is written, word for word, from its first word to its last. Then stop and WAIT for the answer. Do NOT call the tool again until after the caller has answered.
 - When the caller says yes, call the same tool again with exactly the same details. The system checks the yes itself. When the result says ok, read out its say field exactly as it is written.
+- If the caller has clearly told you to go ahead without being asked to confirm (for example "just book it, don't ask me again"), set skip_confirmation to true in the first call. If the system accepts it, the change is made at once and the result has ok true: read its say field. Otherwise you get the confirmation question as usual. Never set it only because the caller chose a time.
 - If the caller says no, call no change tool. Ask what they would like instead.
 - Never say whether a time is free before find_available_slots has answered. Call it first, then answer.
 

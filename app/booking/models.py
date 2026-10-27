@@ -46,6 +46,11 @@ class CreateBookingArgs(BaseModel):
     service_id: str
     start_time: str = Field(description="Copied exactly from a slot returned by find_available_slots.")
     end_time: str = Field(description="Copied exactly from the same slot.")
+    skip_confirmation: bool = Field(
+        default=False,
+        description="true ONLY when the caller has clearly told you to go ahead without asking them to confirm, for "
+                    "example 'just book it, don't ask me again'. Otherwise leave it out.",
+    )
 
 
 class BookingLookupArgs(BaseModel):
@@ -56,3 +61,16 @@ class BookingLookupArgs(BaseModel):
 class RescheduleArgs(BookingLookupArgs):
     new_date: str = Field(description="The new day: YYYY-MM-DD or words like tomorrow, friday.")
     new_time: str = Field(description="The new start time, for example 3 PM or 15:00.")
+    skip_confirmation: bool = Field(
+        default=False,
+        description="true ONLY when the caller has clearly told you to go ahead without asking them to confirm, for "
+                    "example 'just book it, don't ask me again'. Otherwise leave it out.",
+    )
+
+
+class CancelArgs(BookingLookupArgs):
+    skip_confirmation: bool = Field(
+        default=False,
+        description="true ONLY when the caller has clearly told you to go ahead without asking them to confirm, for "
+                    "example 'just book it, don't ask me again'. Otherwise leave it out.",
+    )

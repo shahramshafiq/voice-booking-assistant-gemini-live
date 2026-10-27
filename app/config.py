@@ -112,6 +112,12 @@ class _Reader:
                 self.problems.append(f"{name} has a bad pattern {pattern!r}: {exc}")
         return patterns
 
+    def optional_regex_list(self, name):
+        """Like regex_list, but empty or missing is allowed (an empty list switches the feature off)."""
+        if not (os.getenv(name) or "").strip():
+            return []
+        return self.regex_list(name)
+
     def reply_templates(self, name):
         """Spoken sentences separated with |, with {service}, {when} and {reference} blanks. One is picked at random
         each time. Checked now, so a typo shows up at startup."""
@@ -220,6 +226,7 @@ class Settings:
     confirm_ttl_seconds: float
     read_back_present_share: float
     read_back_min_share: float
+    skip_confirmation_patterns: List[str]
     answer_min_letters: int
 
     # what is said when a change has been made
@@ -327,6 +334,7 @@ def load_settings():
         confirm_ttl_seconds=r.number("CONFIRM_TTL_SECONDS"),
         read_back_present_share=r.number("READ_BACK_PRESENT_SHARE"),
         read_back_min_share=r.number("READ_BACK_MIN_SHARE"),
+        skip_confirmation_patterns=r.optional_regex_list("SKIP_CONFIRMATION_PATTERNS"),
         answer_min_letters=r.integer("ANSWER_MIN_LETTERS"),
         reply_booked=r.reply_templates("REPLY_BOOKED"),
         reply_already_booked=r.reply_templates("REPLY_ALREADY_BOOKED"),

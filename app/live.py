@@ -82,14 +82,13 @@ class GeminiLive:
             detection["startOfSpeechSensitivity"] = s.live_start_sensitivity
         if s.live_end_sensitivity:
             detection["endOfSpeechSensitivity"] = s.live_end_sensitivity
-        return {"setup": {
+        setup = {
             "model": f"models/{s.gemini_live_model}",
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
                 "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": s.gemini_voice}}},
             },
             "systemInstruction": {"parts": [{"text": instructions}]},
-            "tools": [{"functionDeclarations": tools}],
             "realtimeInputConfig": {
                 "automaticActivityDetection": detection,
                 # barge-in: the caller's voice stops the answer (NO_INTERRUPTION lets the answer finish)
@@ -99,7 +98,10 @@ class GeminiLive:
             "outputAudioTranscription": {},  # what Gemini said, as text: the output guardrail and the page need it
             "sessionResumption": {},  # Gemini sends handles, so a closing connection can be continued
             "contextWindowCompression": {"slidingWindow": {}},  # a long call drops its oldest part instead of ending
-        }}
+        }
+        if tools:  # scripts/make_fillers.py only records speech and gives no tools
+            setup["tools"] = [{"functionDeclarations": tools}]
+        return {"setup": setup}
 
     async def connect(self, instructions, tools):
         self.setup = self.build_setup(instructions, tools)

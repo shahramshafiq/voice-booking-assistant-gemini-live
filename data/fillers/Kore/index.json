@@ -1,0 +1,52 @@
+[
+  {
+    "kind": "book",
+    "text": "Great, I'm booking that for you now, it will just take a moment.",
+    "file": "book_1.pcm"
+  },
+  {
+    "kind": "book",
+    "text": "Perfect, I'm getting that booked for you right now.",
+    "file": "book_2.pcm"
+  },
+  {
+    "kind": "book",
+    "text": "Wonderful, let me put that into the calendar for you now.",
+    "file": "book_3.pcm"
+  },
+  {
+    "kind": "book",
+    "text": "Great, I'm saving that booking for you now, one moment.",
+    "file": "book_4.pcm"
+  },
+  {
+    "kind": "reschedule",
+    "text": "Great, I'm moving that for you now, it will just take a moment.",
+    "file": "reschedule_1.pcm"
+  },
+  {
+    "kind": "reschedule",
+    "text": "Sure, I'm changing the time in the calendar for you now.",
+    "file": "reschedule_2.pcm"
+  },
+  {
+    "kind": "reschedule",
+    "text": "Perfect, let me move that appointment for you right now.",
+    "file": "reschedule_3.pcm"
+  },
+  {
+    "kind": "cancel",
+    "text": "Okay, I'm cancelling that for you now, just a moment.",
+    "file": "cancel_1.pcm"
+  },
+  {
+    "kind": "cancel",
+    "text": "Sure, I'm taking that off the calendar for you now.",
+    "file": "cancel_2.pcm"
+  },
+  {
+    "kind": "cancel",
+    "text": "Alright, let me cancel that appointment for you right now.",
+    "file": "cancel_3.pcm"
+  }
+]

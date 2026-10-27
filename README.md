@@ -8,7 +8,7 @@ A voice receptionist that books, looks up, moves and cancels appointments in Goo
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![Gemini Live](https://img.shields.io/badge/Gemini%20Live-gemini--3.8--live-8E75B2?style=flat-square&logo=googlegemini&logoColor=white)
 ![Google Calendar](https://img.shields.io/badge/Google%20Calendar-API%20v3-4285F4?style=flat-square&logo=googlecalendar&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-141%20passing-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-145%20passing-brightgreen?style=flat-square)
 
 </div>
 
@@ -51,7 +51,8 @@ Every tool result is sent with `scheduling: WHEN_IDLE` and, when it worked, a sh
 ## Key Features
 
 - **Eight booking tools:** services, business config, calendar availability, slot search, create, look up, reschedule and cancel. All rules (opening hours, breaks, buffers, notice, durations, cancellation policy) live in backend code and `.env`, never in the model.
-- **Confirm before any change:** the first call to a change tool only parks the action and returns a read-back question written by the code. Gemini reads it out. The change happens only when the caller says yes in their answer after hearing that question. A yes spoken over the name, the phone number or "Shall I book it?" counts once the service, day and time were heard. A yes from any other turn, a question cut short before its day and time, or a read-back that Gemini did not say (or said with a different time, date or day) means the question is asked again. A tiny turn that is only background sound ("A", "es") does not use up the caller's answer.
+- **Confirm before any change:** the first call to a change tool only parks the action and returns a read-back question written by the code. Gemini reads it out. The change happens only when the caller says yes in their answer after hearing that question. A yes spoken over the name, the phone number or "Shall I book it?" counts once the service, day and time were heard. A yes from any other turn, a question cut short before its day and time, or a read-back that Gemini did not say (or said with a different time, date or day) means the question is asked again. A tiny turn that is only background sound ("A", "es") does not use up the caller's answer. A move is read back with the new time first ("moved to Friday at 3 PM, from Thursday at 2 PM"), so a yes over the old time counts. When a yes comes too early, Gemini is told to say sorry and read the question once more instead of carrying on.
+- **Consent up front:** a caller who says "just book it, don't ask me to confirm" is not asked again. The change is made at once only when both Gemini says so (`skip_confirmation` in the tool call) and the caller's own words in that turn match one of `SKIP_CONFIRMATION_PATTERNS`. A plain "book it at 2 PM" still gets the read-back, and the result sentence always says what was done.
 - **One connection for speech, thinking and voice:** no speech to text, model and voice hand-offs. Gemini is connected and set up before Start, the next weeks of the calendar are kept in memory, every tool answers Gemini as soon as it is finished, and a confirmed reschedule reads the booking and the new day from Google at the same time.
 - **Filler sentences:** set per kind of tool call in `.env.example`, sized to how long each tool takes, with a recorded fallback for confirmed changes. The log warns when Gemini calls a tool without a filler or says a sentence twice in a row.
 - **Varied answers:** each result sentence (booked, moved, cancelled) has several wordings, picked at random and always filled from the real calendar result.
@@ -95,7 +96,7 @@ voice-booking-assistant-gemini-live/
   prompts/               System prompt template
   scripts/               check_calendar.py, check_gemini.py and make_fillers.py
   static/                Web page, audio worklets, styles
-  tests/                 141 tests with a fake Gemini server and a fake calendar
+  tests/                 145 tests with a fake Gemini server and a fake calendar
 ```
 
 ## Getting Started
@@ -144,6 +145,7 @@ The settings you are most likely to change (all names and defaults are in `.env.
 | `FILLER_CLIPS_DIR` | `data/fillers` | Where the recorded fillers are kept (one folder per voice) |
 | `TOOL_RESPONSE_SCHEDULING` | `WHEN_IDLE` | When Gemini should speak about a tool result: `WHEN_IDLE`, `INTERRUPT`, `SILENT`, or empty to send nothing |
 | `READ_BACK_PRESENT_SHARE` / `READ_BACK_MIN_SHARE` | `0.3` / `0.6` | Share of the question's words that marks an answer as the read-back, and that must be said for it to count |
+| `SKIP_CONFIRMATION_PATTERNS` | see `.env.example` | Phrases that let a caller skip the read-back ("just book it", "no need to confirm"); empty always asks |
 | `ANSWER_MIN_LETTERS` | `4` | A turn after the question with fewer letters and no yes or no word is treated as background sound |
 | `REPLY_BOOKED`, `REPLY_RESCHEDULED`, `REPLY_CANCELLED` | see `.env.example` | Result sentences, several wordings separated with `\|`, with `{service}`, `{when}` and `{reference}` |
 | `GOOGLE_CALENDAR_ID` | (yours) | The one calendar the assistant books into |
@@ -205,7 +207,7 @@ The page shows both transcripts, the tools that were used and a latency table fo
 
 ### Example conversations
 
-Both were recorded on 27 October 2026 with the real Gemini Live API (`gemini-3.8-live`, voice `Kore`) and an in-memory test calendar, with the longer filler sentences used that day (they have since been shortened). Tool calls are shown in brackets. Numbers that were read one digit at a time are shown as Gemini's transcript wrote them.
+Both were recorded on 27 October 2026 with the real Gemini Live API (`gemini-3.8-live`, voice `Kore`) and an in-memory test calendar, with the longer filler sentences used that day (they have since been shortened, and the move question now says the new time first). Tool calls are shown in brackets. Numbers that were read one digit at a time are shown as Gemini's transcript wrote them.
 
 **Book, move and cancel** (the caller's lines were typed into the session):
 
@@ -232,6 +234,19 @@ Both were recorded on 27 October 2026 with the real Gemini Live API (`gemini-3.8
 > **Assistant:** Alright, one moment. [create_booking: confirmation required] Just to confirm: a Consultation Thursday 29 October at 11 AM, for Ali Raza, phone number 0300 1234567. Shall I book it?<br>
 > **Caller:** Yes, go ahead.<br>
 > **Assistant:** Great, I'm booking that for you now, it will just take a moment. [create_booking: ok] Your Consultation is booked for Thursday 29 October at 11 AM, and your reference number is 348959. Anything else I can help you with?
+
+**Consent given up front** (28 October 2026, same set-up, typed lines):
+
+> **Caller:** Hi, I'd like to book a consultation on Thursday afternoon.<br>
+> **Assistant:** [find_available_slots] Sure, let me see. We have openings tomorrow at 2 PM or 3 PM.<br>
+> **Caller:** The 2 PM please. My name is Ali Raza and my number is 0300 1234567. Just book it, don't ask me to confirm.<br>
+> **Assistant:** Sure, one moment. [create_booking with skip_confirmation: ok] Your Consultation is booked for tomorrow at 2 PM, and your reference number is 7 1 4, 1 2 9. Anything else I can help you with?<br>
+> **Caller:** Thanks. Can you move it to Friday at 3 PM? The reference is 7 1 4 1 2 9 and my number is 0300 1234567. No need to confirm, just move it.<br>
+> **Assistant:** Sure, one moment while I change the time. [reschedule_booking with skip_confirmation: ok] I've moved your Consultation to Friday the 30th of October at 3 PM. Your booking reference remains 7 1 4, 1 2 9. Is there anything else I can assist with?<br>
+> **Caller:** Please cancel it.<br>
+> **Assistant:** Sure, let me check. [get_booking] Okay, one second. [cancel_booking: confirmation required] Just to confirm: you want to cancel your Consultation Friday 30 October at 3 PM. Is that right?<br>
+> **Caller:** Yes.<br>
+> **Assistant:** Okay, I'm cancelling that for you now. [cancel_booking: ok] Your Consultation for Friday 30 October at 3 PM has been cancelled. Is there anything else I can help with?
 
 ## Latency
 
@@ -272,7 +287,7 @@ Other measurements:
 python -m pytest
 ```
 
-The 141 tests need no keys and cost nothing. A local fake Gemini Live server speaks the same JSON protocol as the real one (binary frames, setup, transcripts, tool calls, interruptions, goAway and session resumption), and a fake Google Calendar answers the calendar requests. The tests cover date parsing, slot maths, the booking rules, the confirmation gate, the guardrails, the Gemini client, the latency measurements, the recorded fillers and whole conversations.
+The 145 tests need no keys and cost nothing. A local fake Gemini Live server speaks the same JSON protocol as the real one (binary frames, setup, transcripts, tool calls, interruptions, goAway and session resumption), and a fake Google Calendar answers the calendar requests. The tests cover date parsing, slot maths, the booking rules, the confirmation gate, the guardrails, the Gemini client, the latency measurements, the recorded fillers and whole conversations.
 
 ## Troubleshooting
 
@@ -289,6 +304,7 @@ The 141 tests need no keys and cost nothing. A local fake Gemini Live server spe
 
 - Gemini hears the audio itself, so the input guardrail cannot hide a request from the model. It stops every tool in that turn instead, and the output guardrail checks what is said.
 - The fillers and the way the result follows them are asked for in the prompt, which Gemini usually but not always follows. The recorded filler covers only confirmed changes, because a filler before a quick tool would only make its answer come later.
+- Skipping the read-back depends on Gemini setting `skip_confirmation` and on the caller using one of the phrases in `SKIP_CONFIRMATION_PATTERNS`; other wordings still get the question.
 - Gemini reads the confirmation question out itself, so its transcript is compared with the code's question. A paraphrase that drops too many of its words is asked again.
 - The output guardrail works on Gemini's transcript, which usually arrives before the same words are played, but not always.
 - The end of your speech in the latency table is estimated from the microphone loudness, because Gemini does not report when it decided you had finished.

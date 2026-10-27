@@ -37,6 +37,7 @@ class SessionMemory:
         self.achieved = set()  # tools that really succeeded in this conversation (the output guardrail checks claims against it)
         self.verified_booking = None
         self.question_cut_short = False  # the caller answered the last question before hearing its day and time
+        self.heard_keys = set()  # changes whose question the caller has heard in full at least once in this call
         self.caller_words = []  # [(time, turn, text)]: Gemini's transcript of the caller, piece by piece
 
     # ---------------------------------------------------------------- what the caller said
@@ -76,12 +77,17 @@ class SessionMemory:
     # ---------------------------------------------------------------- the confirmation step
     def set_pending(self, key, tool, question):
         self.pending = Pending(key, tool, question, self.turn_no, time.monotonic())
+        if key in self.heard_keys:
+            # The caller already heard these exact details once: a yes said over the start of the repeat counts.
+            self.pending.heard_at = time.perf_counter()
+            self.pending.heard_turn = self.turn_no
 
     def question_heard(self):
         """The caller has now heard the whole confirmation question (or nearly all of it before they answered)."""
         if self.pending is not None and self.pending.heard_at is None:
             self.pending.heard_at = time.perf_counter()
             self.pending.heard_turn = self.turn_no
+            self.heard_keys.add(self.pending.key)
 
     def pending_is_confirmable(self, key):
         """True when `key` is the action the caller was asked about, they heard the question, they have not said

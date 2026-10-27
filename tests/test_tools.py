@@ -175,6 +175,16 @@ def test_a_yes_with_the_skip_flag_set_is_not_held_up():
     assert time.perf_counter() - started < 0.25  # no wait for a consent phrase after a plain yes
 
 
+def test_once_a_question_was_heard_a_yes_over_its_repeat_counts():
+    fake, _, memory, runner = setup()
+    ask(runner, memory, BOOK)  # heard in full once
+    again = call(runner, "create_booking", BOOK, turn(memory, "hmm"))  # no clear answer: the question comes again
+    assert again["error"] == "CONFIRMATION_REQUIRED"
+    # the caller says yes over the very start of the repeat: they already know these details
+    result = call(runner, "create_booking", BOOK, turn(memory, "Yes, I already said yes."))
+    assert result["ok"] and len(fake.events) == 1
+
+
 def test_a_second_call_that_replaces_the_question_never_crashes_the_first():
     _, _, memory, runner = setup()
     ask(runner, memory, BOOK)

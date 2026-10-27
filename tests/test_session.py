@@ -325,6 +325,16 @@ def test_a_yes_over_the_very_end_of_the_question_counts():
     run(scenario)
 
 
+def test_a_sentence_said_twice_in_a_row_is_logged(caplog):
+    async def scenario(call):
+        await call.gemini.say("Alright, one moment.Alright, one moment.")  # a doubled filler
+        await call.gemini.finish()
+        await until(lambda: call.session.awaiting_drain)
+
+    run(scenario)
+    assert "said the same sentence twice in a row: 'alright, one moment.'" in caplog.text
+
+
 def test_a_result_queued_behind_its_filler_is_reported_when_its_sound_starts():
     async def scenario(call):
         await call.speak()

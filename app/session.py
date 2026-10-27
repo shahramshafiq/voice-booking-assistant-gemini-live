@@ -71,6 +71,12 @@ def _read_back_differs(question, said):
     return bool(told - asked) or bool(asked_weekdays and told_weekdays - asked_weekdays)
 
 
+def _repeated_sentence(text):
+    """'Alright, one moment.Alright, one moment.' -> 'alright, one moment.': a sentence said twice in a row."""
+    sentences = [s.strip().lower() for s in re.findall(r"[^.?!]+[.?!]?", text) if s.strip()]
+    return next((a for a, b in zip(sentences, sentences[1:]) if a == b), None)
+
+
 DETAILS_END = re.compile(r", for |\. (?:Shall I|Is that right)")
 
 
@@ -613,6 +619,9 @@ class VoiceSession:
         reply.finished = True
         self.reply = None
         log.info("reply %d said: %s", reply.number, tidy_numbers(reply.text.strip()) or "(nothing)")
+        repeated = _repeated_sentence(reply.text)
+        if repeated:
+            log.warning("reply %d: Gemini said the same sentence twice in a row: %r", reply.number, repeated)
         if reply.usage:
             log.info("reply %d tokens: %s", reply.number, reply.usage)
         if reply.blocked:

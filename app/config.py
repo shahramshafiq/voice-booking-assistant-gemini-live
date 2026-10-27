@@ -210,6 +210,7 @@ class Settings:
     system_prompt_template: str
     tool_fillers: dict  # kind of tool call -> the filler sentences said right before it
     filler_clips_dir: str
+    tool_response_scheduling: Optional[str]
     max_tool_rounds: int
     tool_timeout_seconds: float
 
@@ -318,6 +319,7 @@ def load_settings():
         tool_fillers={kind: r.text_list(f"TOOL_FILLER_{kind.upper()}", separator="|")
                       for kind in ("search", "lookup", "prepare", "book", "reschedule", "cancel")},
         filler_clips_dir=r.text("FILLER_CLIPS_DIR"),
+        tool_response_scheduling=r.optional_choice("TOOL_RESPONSE_SCHEDULING", ("WHEN_IDLE", "INTERRUPT", "SILENT")),
         max_tool_rounds=r.integer("MAX_TOOL_ROUNDS"),
         tool_timeout_seconds=r.number("TOOL_TIMEOUT_SECONDS"),
         confirm_words=[word.lower() for word in r.text_list("CONFIRM_WORDS")],

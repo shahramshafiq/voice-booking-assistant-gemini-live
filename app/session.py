@@ -811,8 +811,14 @@ class VoiceSession:
         finally:
             self._tool_tasks.pop(call_id, None)
         reply.timer.mark("tools_done")
+        response = for_model(result)
+        if self.settings.tool_response_scheduling:
+            response["scheduling"] = self.settings.tool_response_scheduling  # when Gemini should speak about it
+        if result.get("ok") and "message" not in response:
+            # without a nudge Gemini sometimes sat on a finished result until the caller spoke again
+            response["message"] = "Give the caller the answer now, using this result."
         if self.live is not None:
-            self.live.send_tool_response([{"id": call_id, "name": name, "response": for_model(result)}])
+            self.live.send_tool_response([{"id": call_id, "name": name, "response": response}])
 
     def _on_tool_cancellation(self, cancellation):
         for call_id in cancellation.get("ids") or []:

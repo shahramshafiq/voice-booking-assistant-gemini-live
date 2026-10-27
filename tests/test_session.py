@@ -163,6 +163,8 @@ def test_a_whole_booking_with_the_read_back_and_the_yes():
         await gemini.hear(" I'd like a consultation tomorrow at 9 AM.")
         slots = await gemini.call_tool("find_available_slots", SLOTS, call_id="c1")
         assert slots["id"] == "c1" and slots["response"]["ok"] and slots["response"]["requested_time_free"]
+        assert slots["response"]["scheduling"] == "WHEN_IDLE"  # speak about it once the filler is finished
+        assert slots["response"]["message"].startswith("Give the caller the answer now")
         await gemini.say("9 AM tomorrow is free. May I have your name and phone number?")
         await gemini.finish(total_tokens=900)
         await until(lambda: call.session.awaiting_drain)

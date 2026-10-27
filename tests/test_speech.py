@@ -2,7 +2,7 @@
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
-from app.booking.speech import digit_runs, say_day, say_slot, say_time, spell_digits, tidy_numbers
+from app.booking.speech import digit_runs, say_day, say_slot, say_time, spell_digits, spell_phone, tidy_numbers
 
 
 def test_digits_said_as_words_are_found():
@@ -37,3 +37,9 @@ def test_ordinary_numbers_are_left_alone():
     for text in ("I have 3 PM or 4 PM tomorrow.", "Options 2, 3, 4, 5 are free.", "On the 21st at 9 30.", "We open at 9 and close at 5.",
                  "A 60 minute consultation costs 5000 rupees.", "Pick 1, 2 or 3."):
         assert tidy_numbers(text) == text
+
+
+def test_a_phone_number_is_read_back_the_way_people_say_it():
+    assert spell_phone("03001234567") == "0 3 0 0, 1 2 3, 4 5 6 7"
+    assert tidy_numbers("phone number 0 3 0 0, 1 2 3, 4 5 6 7. Shall I") == "phone number 0300 1234567. Shall I"
+    assert spell_phone("923001234567") == spell_digits("923001234567")  # any other number: groups of three

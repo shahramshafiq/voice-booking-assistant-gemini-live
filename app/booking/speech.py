@@ -3,7 +3,7 @@ and turns the spoken digits back into plain numbers for the page and the convers
 import re
 
 # the two shapes a number takes when it is read one digit at a time
-GROUPED_DIGITS = r"(?:\d \d \d, )+\d(?: \d){0,2}"  # 0 3 0, 0 1 2, 3 4 5, 6 7  (what spell_digits writes)
+GROUPED_DIGITS = r"(?:\d(?: \d){2,3}, )+\d(?: \d){0,3}"  # 0 3 0, 0 1 2, 3 4 5, 6 7 or 0 3 0 0, 1 2 3, 4 5 6 7
 SPACED_DIGITS = r"\d(?: \d){3,}"  # 5 5 0 7 8 1  (what the assistant itself may write)
 SPOKEN_NUMBER = re.compile(rf"(?<!\d)(?:{GROUPED_DIGITS}|{SPACED_DIGITS})(?!\d)")
 
@@ -69,3 +69,11 @@ def spell_digits(digits):
     """'03001234567' -> '0 3 0, 0 1 2, 3 4 5, 6 7' (groups of three, one digit at a time)."""
     groups = [digits[i:i + 3] for i in range(0, len(digits), 3)]
     return ", ".join(" ".join(group) for group in groups)
+
+
+def spell_phone(digits):
+    """'03001234567' -> '0 3 0 0, 1 2 3, 4 5 6 7', the way a Pakistani mobile number is usually said (4, 3, 4).
+    Any other number is read in groups of three."""
+    if len(digits) == 11 and digits.startswith("0"):
+        return ", ".join(" ".join(group) for group in (digits[:4], digits[4:7], digits[7:]))
+    return spell_digits(digits)

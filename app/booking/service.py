@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from .calendar_client import CalendarError, CalendarUnavailable
 from .scheduling import Rules, busy_intervals, event_bounds, free_slots, pick_slots, slot_problem
-from .speech import say_slot, spell_digits
+from .speech import say_slot, spell_digits, spell_phone
 from .timeparse import Preference, parse_clock, parse_date, parse_date_range, parse_time_preference
 
 log = logging.getLogger("booking")
@@ -462,7 +462,7 @@ class BookingService:
 
         key = f"create|{phone_key(phone)}|{service['id']}|{start.astimezone(timezone.utc).isoformat()}|{name.lower()}"
         question = (f"Just to confirm: a {service['name']} {say_slot(start, today)}, for {name}, "
-                    f"phone number {spell_digits(phone)}. Shall I book it?")
+                    f"phone number {spell_phone(phone)}. Shall I book it?")
         return Plan(key=key, question=question, apply=self._safe(create_booking))
 
     # ---------------------------------------------------------------- reschedule

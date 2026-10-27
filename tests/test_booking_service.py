@@ -274,7 +274,7 @@ def test_confirmation_questions_are_exact_and_stable():
     plan1 = run(service.prepare("create_booking", book_args(slot["start"], slot["end"])))
     plan2 = run(service.prepare("create_booking", book_args(slot["start"], slot["end"], name="ali raza", phone="+92 300 1234567")))
     assert plan1.key == plan2.key  # the same booking, said differently, is the same action
-    assert "Consultation tomorrow at 9 AM" in plan1.question and "Ali Raza" in plan1.question and "0 3 0, 0 1 2" in plan1.question
+    assert "Consultation tomorrow at 9 AM" in plan1.question and "Ali Raza" in plan1.question and "0 3 0 0, 1 2 3, 4 5 6 7" in plan1.question
     other_name = run(service.prepare("create_booking", book_args(slot["start"], slot["end"], name="Ali Raza Khan")))
     assert other_name.key != plan1.key  # a different name needs its own confirmation
     later = first_slot(service, pref="after 3 PM")
